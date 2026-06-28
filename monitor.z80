@@ -1,0 +1,679 @@
+;--------------------------------------------------------------
+;
+; CP/M monitor program.
+;
+; Accept strings from CONIN and execute them with CR.
+; BS/RUB deletes char to the left. ^C returns to CP/M.
+;
+; Use SLR z80asm:
+; z80asm monitor/af to create monitor.com
+; z80asm monitor/hf to create monitor.hex
+;
+; Built-in commands
+;
+;
+;  Daaaa		-> Dump 16 bytes of RAM at address aaaa
+;  D			-> Dump next 16 bytes (also CR alone)
+;
+;  Waaaa		-> dump 16 bytes in Wozmon format (aaaa: dd dd ...)
+;  W			-> dump next 16 bytes (also CR alone)
+;
+;  Maaaa dd dd dd ...	-> Modify data byte(s) dd at address aaaa
+;  M dd dd dd ...	-> Modify next data byte(s) dd
+;
+;  aaaa: dd dd dd ...	-> Modify data byte(s) dd at address aaaa (WozMon fmt)
+;
+;  Xaaaa		-> eXecute the routine at address aaaa
+;
+; Other input will generate an "?" message and be ignored.
+;
+;  2026-06-28	Martin Homuth-Rosemann
+;	1st development version
+;	dump, wozdump, modify, wozinput and execute
+;
+;--------------------------------------------------------------
+
+CTRLC		equ     03h
+BS		equ	08h
+CR		equ	0Dh
+LF		equ	0Ah
+SPC		equ	20h
+RUB		equ	7Fh
+
+; select either Z80-MBC2 I/O or CP/M I/O
+MBC2		equ	0
+CPM		equ	1
+
+; Z80-MBC2 IO map
+;
+; Adresses and opcodes for Z80-MBC2 serial I/O
+;
+EX_OPC		equ	00h		; EXECUTE READ/WRITE OPCODE port
+STO_OPC		equ	01h		; STORE OPCODE write port
+RXD		equ	01h		; SERIAL RX read port
+OPC_TX		equ	01h		; SERIAL TX opcode
+OPC_RXAVAIL	equ	8Bh		; Number if input char
+
+; CP/M defines
+;
+BDOS		equ	0005h
+
+
+;
+; CODE
+;
+
+		if	MBC2
+
+		org	0
+
+		endif
+
+		if	CPM
+
+		org	0100h
+
+		endif
+;
+; Here we go
+;
+		ld	sp, stack_top
+
+		jr	prompt
+
+;--------------------------------------------------------------
+;
+; Entry-point to the monitor
+;
+; Append text into input_buffer until a newline
+; is seen, then handle the input.
+;
+;--------------------------------------------------------------
+monitor:
+		ld	a, CR
+		call	conout
+		ld	a, LF
+		call	conout
+prompt:
+		; show the prompt
+		ld	a, '>'
+		call	conout
+		ld	hl, input_buffer
+		ld	d, h
+		ld	e, l
+		; overwrite an previous input line
+		ld	(hl), 0
+
+mon_inp_loop:
+		; read and store the new character
+		call	conin
+	if	CPM
+		; break?
+		cp	CTRLC
+		jp	z, 0
+	endif
+		call	handle_bs
+		jr	c, mon_inp_loop
+
+to_upper:
+		; is it lower-case?  If so upper-case it.
+		cp	'a'
+		jr	c, is_upper
+		cp	'z'+1
+		jr	nc, is_upper
+		and	5fh
+is_upper:
+
+		; add to line
+		ld	(hl),a
+
+		; was it return?  If so process
+		cp	CR
+		jr	z, process_input
+
+		; Otherwise loop for more input
+		inc	hl
+		jr	mon_inp_loop
+
+
+;--------------------------------------------------------------
+; HANDLE_BS - Process backspace/delete in input buffer
+;   Entry:  HL = pointer to current position in buffer
+;           DE = pointer to start of buffer
+;           A  = character entered (08h = BS, 7Fh = RUB)
+;   Exit:   HL = updated pointer (decremented if char deleted)
+;           A  = unchanged
+;           Carry set = character was processed (BS/RUB)
+;           Carry clear = not a BS/RUB
+;   Uses:   A, flags
+;--------------------------------------------------------------
+;
+handle_bs:
+		cp	08h			; backspace?
+		jr	z, do_backspace
+		cp	7fh			; RUB?
+		jr	z, do_backspace
+		or	a			; clear carry (not processed)
+		ret
+
+do_backspace:
+		push	hl				; save current position
+		or	a					; clear carry
+		sbc	hl, de				; HL = offset from start
+		jr	z, bs_cant_delete		; at start, cannot delete
+		jr	c, bs_cant_delete		; before start, cannot delete
+		ld	a, 08h				; backspace
+		call	conout
+		ld	a, ' '				; space (erase displayed char)
+		call	conout
+		ld	a, 08h				; backspace again
+		call	conout
+		pop	hl				; restore original HL
+		dec	hl				; move back one character
+		ld	(hl), 0				; clear the character
+		scf					; set carry (processed)
+		ret
+
+bs_cant_delete:
+		pop	hl				; restore original HL
+		scf					; set carry (still processed)
+		ret
+
+;--------------------------------------------------------------
+; process_input is called when the monitor has received
+; a complete CR-terminated line of text.
+;
+; We process the contents by looking for commands we understand, if we see
+; input we don't recognize we show a message and return, otherwise we invoke
+; the appropriate handler.
+;
+;  D => Dump		DAAAA	-> AAAA  DD DD DD .. DD CCC..C
+;  W => Wozdump		WAAAA	-> AAAA: DD DD DD ..
+;  M => Modify data	MAAAA DD DD ...
+;  X => eXecute		XAAAA
+;--------------------------------------------------------------
+;
+process_input:
+		ld	hl, input_buffer
+		ld	a, (hl)
+		cp	CR
+		jr	nz, process1
+		; handle CR as command repeat for some commands
+		ld	a, (last_cmd)
+		cp	'D'			; DUMP
+		jp	z, process_repeat
+		cp	'W'			; WOZDUMP
+		jp	z, process_repeat
+		; ignore
+		jr	prompt
+
+process_repeat:
+		ld	(hl), a
+		inc	hl
+		ld	(hl), CR
+		dec	hl
+		jr	process2
+
+process1:
+		ld	(last_cmd), a
+		ld	a, LF
+		call	conout
+
+process2:
+		ld	a, (hl)
+
+		; D == DUMP
+		cp	'D'
+		jr	z, dump_handler
+
+		; W == WOZDUMP
+		cp	'W'
+		jr	z, dump_handler
+
+		; M == Modify
+		cp	'M'
+		jp	z, modify_handler
+
+		; X == eXecute
+		cp	'X'
+		jr	z, execute_handler
+
+		; XXXX:
+		; MUST come last b/c it modifies A
+		ld	a, (input_buffer+4)
+		cp	':'
+		jp	z, woz_input
+
+		;
+		; Unknown command - show a message and restart monitor
+		;
+cmd_error:
+		ld	a, '?'
+		call	conout
+		jp	monitor
+
+
+;--------------------------------------------------------------
+;
+; EXECUTE is invoked with the start address
+;
+; For example "X300" will execute the routine at 0x0300
+;
+;--------------------------------------------------------------
+;
+execute_handler:
+		; Our input-buffer will start with 'X',
+		; so we start looking at the next character.
+		ld	hl, input_buffer+1
+		; Skip spaces.
+execute1:	ld	a, (hl)
+		cp	SPC
+		jr	nz, execute2
+		inc	hl
+		jr	execute1
+		; Read the address to call into BC
+execute2:	call	hex_to_bc
+		jp	c, cmd_error
+		; We'll be making a call, so we need to have the return
+		; address on the stack so that when the call'd routine returns
+		; the execution goes somewhere sane.
+		;
+		; We'll want to re-load the monitor, so we'll store the
+		; entry point on the stack
+		;
+		ld	hl,monitor
+		push	hl
+
+		; Now we jump, indirectly, to the address in the BC register.
+		push	bc
+		ret
+
+
+
+;--------------------------------------------------------------
+;
+; DUMP 16 bytes from the current dump_address
+;
+; We're called with either "D1234" or "W1234" if we should start at the given offset
+; or with "D" or "W" (or CR alone) to keep going where we left off.
+;
+;--------------------------------------------------------------
+;
+dump_handler:
+		; Our input-buffer will start with 'D' or 'W',
+		; so we start looking at the next character.
+		ld	hl, input_buffer+1
+
+		; Look at the next input-byte.
+		; Skip spaces, if CR then no address.
+dump1:		ld	a, (hl)
+		cp	CR
+		jr	z, dump_next
+		cp	SPC
+		jr	nz, dump2
+		inc	hl
+		jr	dump1
+		; OK we expect an (ASCII) address following HL - read it into BC.
+dump2:		call	hex_to_bc
+		jp	c, cmd_error
+		ld	(dump_address), bc
+
+dump_next:
+		; The address we start from
+		ld	hl, (dump_address)
+		; show the address
+		call	out_word
+		ld	a, (last_cmd)
+		cp	'W'
+		jr	nz, dump_fmt
+		ld	a, ':'
+		jr	woz_fmt
+dump_fmt:
+		ld	a, ' '
+woz_fmt:
+		call	conout
+
+		; Loop to print the next 16 bytes at that address.
+		ld	b, 16
+dump_byte:
+		; show a space
+		ld	a, ' '
+		call	conout
+
+		; show the memory-contents.
+		ld	c, (hl)
+		call	out_byte
+		inc	hl
+		djnz	dump_byte
+
+		ld	a, (last_cmd)
+		; if woz fmt then skip the ASCII display
+		cp	'W'
+		jr	z, dump_end
+
+		ld	hl, (dump_address)
+
+		ld	a, ' '
+		call	conout
+		ld	a, ' '
+		call	conout
+
+		; Loop to print the next 16 bytes at that address.
+		ld	b, 16
+dump_char:
+		; show the memory-contents as ASCII.
+		ld	a, (hl)
+		cp	' '
+		jr	c, dot
+		cp	7Fh
+		jr	nc, dot
+		jr	no_dot
+dot:		ld	a, '.'
+no_dot:		call	conout
+		inc	hl
+		djnz	dump_char
+
+dump_end:
+		; store our updated/final address.
+		ld	(dump_address), hl
+		jp	monitor
+
+
+
+;--------------------------------------------------------------
+;
+; MODIFY handler allows code to be input at a given address
+;
+; Come here with WOZ format
+;
+; Usage is:
+;
+;  0123: 01 02 03 04 0F
+;
+; i.e. "<address>: byte1 byte2 .. byteN"
+;
+;--------------------------------------------------------------
+;
+woz_input:
+		ld	hl,input_buffer
+		call	hex_to_bc
+		jp	c, cmd_error
+		ld	(modify_address), bc
+		ld	hl,input_buffer+5
+		jr	modify_byte
+
+;--------------------------------------------------------------
+;
+; MODIFY handler allows code to be input at a given address
+;
+; Usage is:
+;
+;  M0123 01 02 03 04 0F
+;
+; i.e. "M<address> byte1 byte2 .. byteN"
+;
+; If there is no address keep going from the last time,
+; which means this works as you expect:
+;
+;   M1000 01 02
+;   M 03 04 0F
+;
+;--------------------------------------------------------------
+;
+modify_handler:
+		; Our input-buffer will start with 'M',
+		; so we start looking at the next character.
+		ld	hl, input_buffer+1
+
+		; Look at the next input-byte.  If it is a space then no address was
+		; given, so we keep appending bytes to the address set previously.
+		ld	a, (hl)
+		cp	' '
+		jr	z, modify_byte
+
+		; OK we expect an (ASCII) address at (HL) - Read it into BC.
+		call	hex_to_bc
+		jp	c, cmd_error
+		ld	(modify_address), bc
+modify_byte:
+		; HL contains the a string.  Get the next byte
+		ld	a, (hl)
+		inc	hl
+
+		; space? skip
+		cp	' '
+		jr	z, modify_byte
+
+		; return? If so we're done
+		cp	CR
+		jp	z, prompt
+
+		; OK, do we have a hex number?
+		dec	hl
+		call	hex_to_bc
+		jp	c, cmd_error
+
+		; store the byte in RAM
+		ld	bc, (modify_address)
+		ld	(bc), a
+
+		; bump to the next address
+		inc	bc
+		ld	(modify_address), bc
+
+		; continue
+		jr	modify_byte
+
+
+;-------------------------------------------------------
+;
+; Convert 1..4 hexadecimal digits to 16-bit value.
+;
+; Entry:
+;       HL -> ASCII string terminated by CR, SPC or non-hex digit
+;
+; Exit (success):
+;       BC = value
+;	A  = low(value)
+;       HL -> terminating char, typically SPACE or CR
+;
+; Exit (error):
+;       HL -> no-hex char
+;	CY set
+;
+; Modifies:
+;       AF,BC,HL
+;-------------------------------------------------------
+
+hex_to_bc:
+		push	de
+		ex	de,hl				; DE = input pointer
+		ld	hl,0				; accumulator
+
+		ld	a,(de)
+
+loop:		call	hexdig				; ASCII->HEX
+		jr	c,hex_err			; CY: non-hex digit
+
+		add	hl,hl				; HL << 4
+		add	hl,hl
+		add	hl,hl
+		add	hl,hl
+
+		add	a,l
+		ld	l,a
+		inc	de				; next char
+		ld	a, (de)
+		cp	SPC
+		jr	z, done
+		cp	CR
+		jr	z, done
+		jr	loop
+
+done:
+		ld	b,h
+		ld	c,l
+		ex	de,hl				; HL -> terminator
+		ld	a, c
+hex_err:
+		pop	de
+		ret
+
+
+;-------------------------------------------------------
+; Convert ASCII hex digit to nibble.
+;
+; Entry:
+;       A = ASCII character
+;
+; Exit:
+;       CY = 0, A = 0..15
+;       CY = 1 if invalid
+;
+; Modifies:
+;       AF
+;-------------------------------------------------------
+
+hexdig:
+		cp	'0'
+		jr	c,bad
+
+		cp	'9'+1
+		jr	c,digit
+
+		cp	'A'
+		jr	c,bad
+
+		cp	'F'+1
+		jr	c,upper
+
+		cp	'a'
+		jr	c,bad
+
+		cp	'f'+1
+		jr	nc,bad
+
+		sub	'a'-10
+		or	a				; clear CY
+		ret
+
+upper:
+		sub	'A'-10
+		or	a
+		ret
+
+digit:
+		sub	'0'
+		or	a
+		ret
+
+bad:
+		scf
+		ret
+
+
+;
+; Display the 16-bit number stored in HL in hex.
+;
+out_word:
+		ld	c,h
+		call	out_byte
+		ld	c,l
+		call	out_byte
+		ret
+
+;
+; Display the 8-bit number stored in C in hex.
+;
+out_byte:
+		ld	 a,c
+		rra
+		rra
+		rra
+		rra
+		call	 out_nibble
+		ld	 a,c
+out_nibble:
+		and	0Fh
+		add 	a,90h
+		daa
+		adc	a,40h
+		daa
+
+conout:
+	if	MBC2
+
+		push	af			; Save TXD char
+		ld	a, OPC_TX		; TXD opcode
+		out	(STO_OPC), a		; Prepare execution
+		pop	af
+		out	(EX_OPC), a		; Execute TXD
+		ret
+
+	endif
+
+	if	CPM
+
+		push	bc
+		push	de
+		push	hl
+		ld	c,2
+		ld	e,a
+		call	bdos
+		pop	hl
+		pop	de
+		pop	bc
+		ret
+
+	endif
+
+conin:
+	if	MBC2
+
+		in	a, (RXD)		; Read a char from "virtual" UART
+		cp	0FFh			; Char? ($FF from UART = no char)
+		jr	z, conin		; No, loop until valid character
+		ret
+
+	endif
+
+	if	CPM
+
+		push	bc
+		push	de
+		push	hl
+		ld	c, 1
+		call	bdos
+		pop	hl
+		pop	de
+		pop	bc
+		ret
+
+	endif
+
+;
+; DATA
+;
+
+; last entered command character (for cmd repeat with CR only)
+last_cmd:
+		db	0
+; DUMP: We track of the address from which we're dumping.
+dump_address:
+		dw	0
+; INPUT: Keep track of the address to which we next write.
+; Init to input_buffer, M abcd ef ... (space between M and address)
+; writes cd ef ... into input buffer w/o destroying important content
+modify_address:
+		dw	input_buffer
+
+;
+; BSS
+;
+
+stack_bottom:
+		ds	32
+stack_top:
+
+; Command-line input buffer.
+input_buffer:

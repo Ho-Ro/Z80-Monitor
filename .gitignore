@@ -1,0 +1,13 @@
+# Assembler artifacts
+*.lst
+*.map
+*.sym
+
+# Editor and work artifacts
+*~
+.*~
+*.bak
+*.new
+*.old
+*.orig
+*.work
