@@ -1,0 +1,51 @@
+;--------------------------------------------------------------
+; TESTROUTINE for breakpoint
+;--------------------------------------------------------------
+monitor		equ	100h
+
+bdos		equ	0005h
+
+CR		equ	0Dh
+LF		equ	0Ah
+
+		org	1000h
+test:
+		ld	sp, 1100h
+		ld	hl, 0
+		xor	a
+		ld	b, 20
+test1:		dec	a
+		inc	hl
+		call	test_sub
+		djnz	test1
+		ld	hl, testready
+		call	out_string
+		jp	monitor
+
+test_sub:
+		rlca
+		ret
+
+
+out_string:
+		ld	a, (hl)
+		or	a
+		ret	z
+		call	conout
+		inc	hl
+		jr	out_string
+
+conout:
+		push	bc
+		push	de
+		push	hl
+		ld	c,2
+		ld	e,a
+		call	bdos
+		pop	hl
+		pop	de
+		pop	bc
+		ret
+
+
+testready:	db	CR, LF, "READY", CR, LF, 0
