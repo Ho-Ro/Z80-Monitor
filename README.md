@@ -27,31 +27,40 @@ I started with the command line parser and some standard functions, with this sy
 
     <CMD><ADDRESS>[ <ARG> <ARG> ...]<RETURN>
 
-- **SHOW**
+- **SHOW** memory content
   - `SAAAA` - show 16 bytes at `AAAA` as hex and ASCII (`AAAA  DD DD ...  CC ..`).
   - `S` - (or CR alone) show the next 16 bytes after previous dump.
   - `WAAAA` - dump 16 bytes at `AAAA` in WozMon fmt (`AAAA: DD DD ...`).
   - `W` - (or CR alone) dump the next 16 bytes after previous dump in WozMon fmt.
 
-- **MODIFY**
+- **MODIFY** memory content
 
-  - `MAAAA DD DD ...` - modify mem at `AAAA`, no space between `'M'` and the address!.
+  - `MAAAA DD DD ...` - modify mem at `AAAA`, **no space between `'M'` and the address!**.
   - `M DD DD ...` - modify next mem bytes.
   - `AAAA: DD DD ...` - modify mem at `AAAA` using WozMon fmt (see SHOW).
 
-- **GOTO**
+- **GOTO** program location
 
   - `GAAAA` - goto program at `AAAA`.
   - `GAAAA BBBB` - goto program at `AAAA` and set a breakpoint at `BBBB`.
   - `G` - resume execution from last breakpoint.
 
-- **REGISTER**
+- **REGISTER** display
 
   - `R` - show the user register
 
-- **SET REGISTER**
+- **SET REGISTER** for following `G` command
 
-  - `A`, `F`, `B`, `C`, `D`, `E`, `H`, `L`, `X`, `Y` - set register A, F, B, C, D, E, H, L, IX, IY
+  - `A dd` - set register `A`
+  - `F dd` - set register `F`
+  - `B dd` - set register `B`
+  - `C dd` - set register `C`
+  - `D dd` - set register `D`
+  - `E dd` - set register `E`
+  - `H dd` - set register `H`
+  - `L dd` - set register `L`
+  - `X dddd` - set register `IX`
+  - `Y dddd` - set register `IY`
 
 
 The command line input uses `BS` or `RUB` to delete to the left. `^C` returns to CP/M.
