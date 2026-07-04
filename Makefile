@@ -1,15 +1,24 @@
 .PHONY: all
-all: monitor.com montest.woz
+all: monitor.com montest.com test.woz
 
-monitor.com: monitor.z80
-	zx80asm monitor/afs
+monitor.com: monitor.hex
+	zxcpm load monitor
 
-montest.hex: montest.z80
-	zx80asm montest/hfs
+montest.com: montest.hex
+	zxcpm load montest
 
-montest.woz: montest.hex
-	iload -w -s montest.hex > montest.woz
+montest.hex: monitor.hex test.hex
+	./hexcat $^ > $@
+
+monitor.hex: monitor.z80
+	zx80asm monitor/hfs
+
+test.hex: test.z80
+	zx80asm test/hfs
+
+test.woz: test.hex
+	iload -w -s $< > $@
 
 .PHONY: clean
 clean:
-	rm -f monitor.lst monitor.com montest.lst montest.hex montest.woz *~
+	rm -f monitor.com montest.com test.woz *.hex *.lst *~

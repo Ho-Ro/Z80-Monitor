@@ -19,11 +19,13 @@ test:
 		ex	af, af'
 		ld	hl, 0
 		xor	a
-		ld	b, 20
+		ld	b, 5
 test1:
 		dec	a
 		inc	hl
 		call	test_sub
+		nop
+		nop
 		djnz	test1
 		call	out_word
 		ld	hl, testready
