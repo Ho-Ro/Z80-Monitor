@@ -13,13 +13,19 @@ LF		equ	0Ah
 		org	1000h
 test:
 		ld	sp, 1100h
+		ex	af, af'
+		ld	a, 55h
+		ld	i, a
+		ex	af, af'
 		ld	hl, 0
 		xor	a
 		ld	b, 20
-test1:		dec	a
+test1:
+		dec	a
 		inc	hl
 		call	test_sub
 		djnz	test1
+		call	out_word
 		ld	hl, testready
 		call	out_string
 		jp	monitor
@@ -36,6 +42,29 @@ out_string:
 		call	conout
 		inc	hl
 		jr	out_string
+
+;
+; Display the 16-bit number stored in HL in hex.
+;
+out_word:
+		ld	c,h
+		call	out_byte
+		ld	c,l
+; Display the 8-bit number stored in C in hex.
+out_byte:
+		ld	 a,c
+		rra
+		rra
+		rra
+		rra
+		call	 out_nibble
+		ld	 a,c
+out_nibble:
+		and	0Fh
+		add 	a,90h
+		daa
+		adc	a,40h
+		daa
 
 conout:
 		push	bc

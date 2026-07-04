@@ -300,7 +300,7 @@ process_B:
 		cp	'B'
 		jr	nz, process_C
 		call	get_first_arg
-		jr	c, cmd_error
+		jp	c, cmd_error
 		ld	(user_bc+1), a
 		jp	prompt1
 process_C:
@@ -338,10 +338,18 @@ process_H:
 process_L:
 		; L == LREG
 		cp	'L'
-		jr	nz, process_IX
+		jr	nz, process_I
 		call	get_first_arg
 		jr	c, cmd_error
 		ld	(user_hl), a
+		jp	prompt1
+process_I:
+		; I == IREG
+		cp	'I'
+		jr	nz, process_IX
+		call	get_first_arg
+		jr	c, cmd_error
+		ld	(user_i), a
 		jp	prompt1
 process_IX:
 		; X == IXREG
@@ -795,19 +803,30 @@ breakpoint:
 		; Save complete user context
 		ld	(user_sp), sp
 		ld	sp, debug_stack			; switch to debug stack
-
 		push	iy
 		push	ix
 		push	hl
 		push	de
 		push	bc
 		push	af
+		exx					; save 2nd reg set
+		push	hl
+		push	de
+		push	bc
+		exx
+		ex	af, af'
+		push	af
+		ex	af, af'
+		ld	a, r
+		ld	(user_r), a
+		ld	a, i
+		ld	(user_i), a
 
 		; Copy stacked registers to user context
 		ld	hl, 0
 		add	hl, sp
-		ld	de, user_af
-		ld	bc, 12				; 6 register pairs
+		ld	de, user_af2
+		ld	bc, 20				; 10 register pairs on stack
 		ldir
 
 		; Get return address (points after RST 30h)
@@ -834,17 +853,9 @@ breakpoint:
 ; DISPLAY_REGS - Show all user registers
 ;--------------------------------------------------------------
 display_regs:
-		ld	hl, regs_msg
+		ld	hl, regs_msg1
 		call	out_string
 
-		ld	hl, (user_pc)
-		call	out_word			; PC
-		ld	a, ' '
-		call	conout
-		ld	hl, (user_sp)
-		call	out_word			; SP
-		ld	a, ' '
-		call	conout
 		ld	hl, (user_af)
 		call	out_word			; AF
 		ld	a, ' '
@@ -861,12 +872,46 @@ display_regs:
 		call	out_word			; HL
 		ld	a, ' '
 		call	conout
+		ld	hl, (user_af2)
+		call	out_word			; AF'
+		ld	a, ' '
+		call	conout
+		ld	hl, (user_bc2)
+		call	out_word			; BC'
+		ld	a, ' '
+		call	conout
+		ld	hl, (user_de2)
+		call	out_word			; DE'
+		ld	a, ' '
+		call	conout
+		ld	hl, (user_hl2)
+		call	out_word			; HL'
+		ld	a, ' '
+		call	conout
 		ld	hl, (user_ix)
 		call	out_word			; IX
 		ld	a, ' '
 		call	conout
 		ld	hl, (user_iy)
 		call	out_word			; IY
+		ld	a, ' '
+		call	conout
+		ld	a, (user_i)
+		ld	c, a
+		call	out_byte
+		ld	a, ' '
+		call	conout
+		ld	a, (user_r)
+		ld	c, a
+		call	out_byte
+		ld	a, ' '
+		call	conout
+		ld	hl, (user_pc)
+		call	out_word			; PC
+		ld	a, ' '
+		call	conout
+		ld	hl, (user_sp)
+		call	out_word			; SP
 		jp	out_crlf
 
 
@@ -874,6 +919,11 @@ display_regs:
 ; RESTORE_USER_CONTEXT - Set up registers and jump to user code
 ;--------------------------------------------------------------
 restore_user_context:
+		ex	af, af'
+		ld	hl, (user_af2)
+		push	hl
+		pop	af
+		ex	af, af'
 		ld	hl, (user_af)
 		push	hl
 		pop	af
@@ -882,6 +932,11 @@ restore_user_context:
 		push	hl			; put on stack for indirect jump
 		ld	iy, (user_iy)
 		ld	ix, (user_ix)
+		exx
+		ld	hl, (user_hl2)
+		ld	de, (user_de2)
+		ld	bc, (user_bc2)
+		exx
 		ld	hl, (user_hl)
 		ld	de, (user_de)
 		ld	bc, (user_bc)
@@ -892,7 +947,10 @@ restore_user_context:
 ; DATA
 ;
 
-regs_msg:	db	0dh, 0ah, " PC   SP   AF   BC   DE   HL   IX   IY", 0dh, 0ah, 0
+regs_msg1:	db	0dh, 0ah,
+		db	" AF   BC   DE   HL   AF'  BC'  DE'  HL' "
+		db	" IX   IY   I  R  PC   SP"
+		db	0dh, 0ah, 0
 
 
 ; last entered command character (for cmd repeat with CR only)
@@ -917,6 +975,12 @@ break_opc:	db	0
 		;org	($+0fh) and 0fff0h
 
 user_sp:	dw	stack_top
+user_i		db	0
+user_r		db	0
+user_af2:	dw	0			; AF'
+user_bc2:	dw	0			; BC'
+user_de2:	dw	0			; DE'
+user_hl2:	dw	0			; HL'
 user_af:	dw	0
 user_bc:	dw	0
 user_de:	dw	0

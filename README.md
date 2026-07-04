@@ -47,7 +47,7 @@ I started with the command line parser and some standard functions, with this sy
 
 - **REGISTER** display
 
-  - `R` - show the user register
+  - `R` - show the user register including the 2nd register set `AF'`, `BC'`, `DE'`, `HL'`
 
 - **SET REGISTER** for following `G` command
 
