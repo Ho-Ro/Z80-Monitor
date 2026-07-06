@@ -4,15 +4,19 @@
 ; TESTROUTINE for breakpoint
 ;--------------------------------------------------------------
 monitor		equ	100h
-
-bdos		equ	0005h
+conin		equ	103h
+conout		equ	106h
+out_byte	equ	109h
+out_crlf	equ	10ch
+out_word	equ	10fh
+out_string	equ	112h
+hex_to_bc	equ	115h
 
 CR		equ	0Dh
 LF		equ	0Ah
 
 		org	1000h
 test:
-		ld	sp, 1100h
 		ex	af, af'
 		ld	a, 55h
 		ld	i, a
@@ -27,6 +31,7 @@ test1:
 		nop
 		nop
 		djnz	test1
+
 		call	out_word
 		ld	hl, testready
 		call	out_string
@@ -34,50 +39,6 @@ test1:
 
 test_sub:
 		rlca
-		ret
-
-
-out_string:
-		ld	a, (hl)
-		or	a
-		ret	z
-		call	conout
-		inc	hl
-		jr	out_string
-
-;
-; Display the 16-bit number stored in HL in hex.
-;
-out_word:
-		ld	c,h
-		call	out_byte
-		ld	c,l
-; Display the 8-bit number stored in C in hex.
-out_byte:
-		ld	 a,c
-		rra
-		rra
-		rra
-		rra
-		call	 out_nibble
-		ld	 a,c
-out_nibble:
-		and	0Fh
-		add 	a,90h
-		daa
-		adc	a,40h
-		daa
-
-conout:
-		push	bc
-		push	de
-		push	hl
-		ld	c,2
-		ld	e,a
-		call	bdos
-		pop	hl
-		pop	de
-		pop	bc
 		ret
 
 

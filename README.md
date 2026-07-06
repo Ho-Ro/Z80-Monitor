@@ -43,7 +43,7 @@ I started with the command line parser and some standard functions, with this sy
 
   - `GAAAA` - goto program at `AAAA`.
   - `GAAAA BBBB` - goto program at `AAAA` and set a breakpoint at `BBBB`.
-  - `G` - resume execution from last breakpoint.
+  - `G` - resume execution from user PC unless it is 0.
 
 - **REGISTER** display
 

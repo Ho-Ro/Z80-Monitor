@@ -2,7 +2,7 @@
 
 ;--------------------------------------------------------------
 ;
-; CP/M monitor program.
+; Monitor program for CP/M or Z80-MBC2
 ;
 ; Accept strings from CONIN and execute them with CR.
 ; BS/RUB deletes char to the left. ^C returns to CP/M.
@@ -40,7 +40,13 @@
 ;	1st development version
 ;	dump, wozdump, modify, wozinput and execute
 ;
+;  2026-07-06	Martin Homuth-Rosemann
+;	add breakpoint handling
+;
 ;--------------------------------------------------------------
+
+FALSE		equ	0
+TRUE		equ	not FALSE
 
 CTRLC		equ     03h
 BS		equ	08h
@@ -50,22 +56,26 @@ SPC		equ	20h
 RUB		equ	7Fh
 
 ; select either Z80-MBC2 I/O or CP/M I/O
-MBC2		equ	0
-CPM		equ	1
+CPM		equ	TRUE
+MBC2		equ	not CPM
 
 ; Z80-MBC2 IO map
 ;
 ; Adresses and opcodes for Z80-MBC2 serial I/O
 ;
+	if	MBC2
 EX_OPC		equ	00h		; EXECUTE READ/WRITE OPCODE port
 STO_OPC		equ	01h		; STORE OPCODE write port
 RXD		equ	01h		; SERIAL RX read port
 OPC_TX		equ	01h		; SERIAL TX opcode
 OPC_RXAVAIL	equ	8Bh		; Number if input char
+	endif
 
 ; CP/M defines
 ;
+	if	CPM
 BDOS		equ	0005h
+	endif
 
 ; Breakpoint defines
 ;
@@ -78,7 +88,7 @@ OPC_RST30	equ	0f7h
 
 		if	MBC2
 
-		org	0
+		org	0F000h
 
 		endif
 
@@ -90,36 +100,53 @@ OPC_RST30	equ	0f7h
 
 ;--------------------------------------------------------------
 ;
-; Entry-point to the monitor
+; Monitor entry-point with a jump list to user functions
 ;
-; Append text into input_buffer until a newline
-; is seen, then handle the input.
+; Init stack and breakpoint.
+; Append text into input_buffer until a newline is seen,
+; then handle the function and its arguments.
 ;
 ;--------------------------------------------------------------
-monitor:
+start:
+		jp	init			; cold start
+		jp	conin			; wait for char in A
+		jp	conout			; output char in A
+		jp	out_byte		; output A as 2 hex digits
+		jp	out_crlf		; output CR and LF
+		jp	out_word		; output HL as 4 hex digits
+		jp	out_string		; output null terminated string pointed by HL
+		jp	hex_to_bc		; convert 1..4 digit hex
+						; input: HL points to 1st hex char
+						; output: BC and A, HL points after hex char
+						; CY set when error, HL points to bad char
+init:
 		ld	sp, stack_top
 		ld	(user_sp), sp
+		ld	hl, user_i
+		xor	a
+		ld	b, user_pc-user_i	; clear all user_xx reg
+init1:		ld	(hl), a
+		inc	hl
+		djnz	init1
 		ld	a, OPC_JP
 		ld	(30h), a		; at RST30
 		ld	hl, breakpoint
 		ld	(31h), hl
-		ld	a, CR
-		call	conout
-		ld	a, LF
-		call	conout
-prompt:
-		ld	hl, break_addr+1
-		ld	a, (hl)
-		dec	hl
-		or	(hl)			; breakpoint set?
-		jr	z, prompt1		; no
+monitor:
+		call	out_crlf
+monitor1:
+		ld	hl, (break_addr)
+		ld	a, h
+		or	l			; breakpoint set?
+		jr	z, no_brk		; no
 		ld	a, (break_opc) 		; get orginal opcode
 		ld	(hl), a			; restore it
-		ld	hl, 0
-		ld	(break_addr), hl	; no breakpoint set
+no_brk:		ld	hl, 0
+		ld	(break_addr), hl	; clear breakpoint addr
+		ld	(user_pc), hl		; clear user PC
 		; show the prompt
-prompt1:	ld	a, '>'
-prompt2:	call	conout
+prompt:		ld	a, '>'
+		call	conout
 		ld	hl, input_buffer
 		ld	d, h
 		ld	e, l
@@ -239,14 +266,12 @@ process0:
 		jr	nz, process1
 		; handle CR as command repeat for some commands
 		ld	a, (last_cmd)
-		;cp	'G'			; GOTO
-		;jp	z, process_repeat
 		cp	'S'			; SHOW
 		jp	z, process_repeat
 		cp	'W'			; WOZDUMP
 		jp	z, process_repeat
 		; ignore
-		jp	prompt
+		jp	monitor1
 process_repeat:
 		ld	(hl), a
 		inc	hl
@@ -282,7 +307,7 @@ process2:
 		cp	'R'
 		jr	nz, process_A
 		call	display_regs
-		jp	prompt1
+		jp	prompt
 
 		; set user register
 process_A:
@@ -292,7 +317,7 @@ process_A:
 		call	get_first_arg
 		jp	c, cmd_error
 		ld	(user_af+1), a
-		jp	prompt1
+		jp	prompt
 process_F:
 		; F == FLAGS
 		cp	'F'
@@ -300,7 +325,7 @@ process_F:
 		call	get_first_arg
 		jp	c, cmd_error
 		ld	(user_af), a
-		jp	prompt1
+		jp	prompt
 process_B:
 		; B == BREG
 		cp	'B'
@@ -308,15 +333,15 @@ process_B:
 		call	get_first_arg
 		jp	c, cmd_error
 		ld	(user_bc+1), a
-		jp	prompt1
+		jp	prompt
 process_C:
 		; C == CREG
 		cp	'C'
 		jr	nz, process_D
 		call	get_first_arg
-		jr	c, cmd_error
+		jp	c, cmd_error
 		ld	(user_bc), a
-		jp	prompt1
+		jp	prompt
 process_D:
 		; D == DREG
 		cp	'D'
@@ -324,7 +349,7 @@ process_D:
 		call	get_first_arg
 		jr	c, cmd_error
 		ld	(user_de+1), a
-		jp	prompt1
+		jp	prompt
 process_E:
 		; E == EREG
 		cp	'E'
@@ -332,7 +357,7 @@ process_E:
 		call	get_first_arg
 		jr	c, cmd_error
 		ld	(user_de), a
-		jp	prompt1
+		jp	prompt
 process_H:
 		; H == HREG
 		cp	'H'
@@ -340,7 +365,7 @@ process_H:
 		call	get_first_arg
 		jr	c, cmd_error
 		ld	(user_hl+1), a
-		jp	prompt1
+		jp	prompt
 process_L:
 		; L == LREG
 		cp	'L'
@@ -348,7 +373,7 @@ process_L:
 		call	get_first_arg
 		jr	c, cmd_error
 		ld	(user_hl), a
-		jp	prompt1
+		jp	prompt
 process_I:
 		; I == IREG
 		cp	'I'
@@ -356,7 +381,7 @@ process_I:
 		call	get_first_arg
 		jr	c, cmd_error
 		ld	(user_i), a
-		jp	prompt1
+		jp	prompt
 process_IX:
 		; X == IXREG
 		cp	'X'
@@ -364,22 +389,30 @@ process_IX:
 		call	get_first_arg
 		jr	c, cmd_error
 		ld	(user_ix), bc
-		jp	prompt1
+		jp	prompt
 process_IY:
 		; Y == IYREG
 		cp	'Y'
-		jr	nz, cmd_error
+		jr	nz, process_PC
 		call	get_first_arg
 		jr	c, cmd_error
 		ld	(user_iy), bc
-		jp	prompt1
+		jp	prompt
+process_PC:
+		; P == user PC
+		cp	'P'
+		jr	nz, cmd_error
+		call	get_first_arg
+		jr	c, cmd_error
+		ld	(user_pc), bc
+		jp	prompt
 		;
 		; Unknown command - show a message and restart monitor
 		;
 cmd_error:
 		ld	a, '?'
 		call	conout
-		jp	monitor
+		jp	init
 
 
 
@@ -441,7 +474,7 @@ dump_byte:
 		call	conout
 
 		; show the memory-contents.
-		ld	c, (hl)
+		ld	a, (hl)
 		call	out_byte
 		inc	hl
 		djnz	dump_byte
@@ -546,7 +579,7 @@ modify_byte:
 
 		; return? If so we're done
 		cp	CR
-		jp	z, prompt
+		jp	z, monitor
 
 		; OK, do we have a hex number?
 		dec	hl
@@ -689,21 +722,21 @@ out_crlf:
 
 
 ;
-; Display the 16-bit number stored in HL in hex.
+; Display the 16-bit number in HL as hex.
 ;
 out_word:
-		ld	c,h
+		ld	a,h
 		call	out_byte
-		ld	c,l
-; Display the 8-bit number stored in C in hex.
+		ld	a,l
+; Display the 8-bit number in A as hex.
 out_byte:
-		ld	 a,c
+		push	af
 		rra
 		rra
 		rra
 		rra
-		call	 out_nibble
-		ld	 a,c
+		call	out_nibble
+		pop	af
 out_nibble:
 		and	0Fh
 		add 	a,90h
@@ -767,8 +800,6 @@ conin:
 ;
 ; GOTO is invoked with the start address and an optional breakpoint address
 ;
-; For example "G300" will execute the routine at 0x0300
-;
 ;--------------------------------------------------------------
 ;
 goto_handler:
@@ -785,7 +816,7 @@ goto3:		ld	a, (hl)
 		inc	hl
 		jr	goto3
 goto4:		call	hex_to_bc		; a: low
-		jr	c, goto_user		; no hex -> no breakpoint
+		jr	c, goto_user0		; no hex -> no breakpoint
 		or	b			; high
 		jr	z, goto_user		; 0000 -> no breakpoint
 		; Gaaaa bbbb -> prepare breakpoint
@@ -795,6 +826,12 @@ goto4:		call	hex_to_bc		; a: low
 		ld	a, OPC_RST30
 		ld	(bc), a			; replace opcode with RST
 goto_user:
+		ld	a, (user_pc)
+		ld	b, a
+		ld	a, (user_pc+1)
+		or	b
+		jp	z, cmd_error		; error if user PC not set
+goto_user0:	; come here with Gxxxx to allow G0
 		; set user stack, register, jp to (user_pc)
 		jp	restore_user_context
 
@@ -827,11 +864,11 @@ breakpoint:
 		ld	a, i
 		ld	(user_i), a
 
-		; Copy stacked registers to user context
+		; Copy 10 stacked register pairs to user context
 		ld	hl, 0
 		add	hl, sp
 		ld	de, user_af2
-		ld	bc, 20				; 10 register pairs on stack
+		ld	bc, 20
 		ldir
 
 		; Get return address (points after RST 30h)
@@ -855,7 +892,7 @@ breakpoint:
 		call	display_regs
 
 		; Return to debug prompt
-		jp	prompt1
+		jp	prompt
 
 
 ;--------------------------------------------------------------
@@ -865,8 +902,12 @@ display_regs:
 		ld	hl, regs_msg1
 		call	out_string
 
-		ld	hl, (user_af)
-		call	out_word			; AF
+		ld	a, (user_af+1)
+		call	out_byte			; A
+		ld	a, ' '
+		call	conout
+		ld	a, (user_af)
+		call	out_byte			; F
 		ld	a, ' '
 		call	conout
 		ld	hl, (user_bc)
@@ -881,8 +922,12 @@ display_regs:
 		call	out_word			; HL
 		ld	a, ' '
 		call	conout
-		ld	hl, (user_af2)
-		call	out_word			; AF'
+		ld	a, (user_af2+1)
+		call	out_byte			; A'
+		ld	a, ' '
+		call	conout
+		ld	a, (user_af2)
+		call	out_byte			; F'
 		ld	a, ' '
 		call	conout
 		ld	hl, (user_bc2)
@@ -906,12 +951,10 @@ display_regs:
 		ld	a, ' '
 		call	conout
 		ld	a, (user_i)
-		ld	c, a
 		call	out_byte
 		ld	a, ' '
 		call	conout
 		ld	a, (user_r)
-		ld	c, a
 		call	out_byte
 		ld	a, ' '
 		call	conout
@@ -956,10 +999,10 @@ restore_user_context:
 ; DATA
 ;
 
-regs_msg1:	db	0dh, 0ah,
-		db	" AF   BC   DE   HL   AF'  BC'  DE'  HL' "
+regs_msg1:	db	CR, LF
+		db	" A  F  BC   DE   HL  A' F'  BC'  DE'  HL' "
 		db	" IX   IY   I  R  PC   SP"
-		db	0dh, 0ah, 0
+		db	CR, LF, 0
 
 
 ; last entered command character (for cmd repeat with CR only)
@@ -996,13 +1039,14 @@ user_de:	dw	0
 user_hl:	dw	0
 user_ix:	dw	0
 user_iy:	dw	0
-user_pc:	dw	1000h
+user_pc:	dw	0
+eser_end:
 
 ;
 ; BSS
 ;
 
-		;org	($+0fh) and 0fff0h
+		org	($+0fh) and 0fff0h
 
 stack_bottom:
 		ds	64
