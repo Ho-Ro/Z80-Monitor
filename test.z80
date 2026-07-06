@@ -19,11 +19,10 @@ LF		equ	0Ah
 test:
 		ex	af, af'
 		ld	a, 55h
-		ld	i, a
 		ex	af, af'
 		ld	hl, 0
-		xor	a
-		ld	b, 5
+		ld	a, 80h
+		ld	b, 10
 test1:
 		dec	a
 		inc	hl

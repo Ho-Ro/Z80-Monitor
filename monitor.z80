@@ -81,6 +81,7 @@ BDOS		equ	0005h
 ;
 OPC_JP		equ	0c3h
 OPC_RST30	equ	0f7h
+OPC_RST28	equ	0efh
 
 ;
 ; CODE
@@ -130,8 +131,11 @@ init1:		ld	(hl), a
 		djnz	init1
 		ld	a, OPC_JP
 		ld	(30h), a		; at RST30
+		ld	(28h), a		; at RST28
 		ld	hl, breakpoint
 		ld	(31h), hl
+		ld	hl, restorepoint
+		ld	(29h), hl
 monitor:
 		call	out_crlf
 monitor1:
@@ -141,8 +145,17 @@ monitor1:
 		jr	z, no_brk		; no
 		ld	a, (break_opc) 		; get orginal opcode
 		ld	(hl), a			; restore it
-no_brk:		ld	hl, 0
+no_brk:
+		ld	hl, (restore_addr)
+		ld	a, h
+		or	l			; restorepoint set?
+		jr	z, no_rst		; no
+		ld	a, (restore_opc) 	; get orginal opcode
+		ld	(hl), a			; restore it
+no_rst
+		ld	hl, 0
 		ld	(break_addr), hl	; clear breakpoint addr
+		ld	(restore_addr), hl	; clear restorepoint addr
 		ld	(user_pc), hl		; clear user PC
 		; show the prompt
 prompt:		ld	a, '>'
@@ -266,12 +279,14 @@ process0:
 		jr	nz, process1
 		; handle CR as command repeat for some commands
 		ld	a, (last_cmd)
+		cp	'G'			; SHOW
+		jr	z, process_repeat
 		cp	'S'			; SHOW
-		jp	z, process_repeat
+		jr	z, process_repeat
 		cp	'W'			; WOZDUMP
-		jp	z, process_repeat
+		jr	z, process_repeat
 		; ignore
-		jp	monitor1
+		jp	prompt
 process_repeat:
 		ld	(hl), a
 		inc	hl
@@ -407,12 +422,13 @@ process_PC:
 		ld	(user_pc), bc
 		jp	prompt
 		;
-		; Unknown command - show a message and restart monitor
+		; Unknown command - show error message
 		;
 cmd_error:
 		ld	a, '?'
 		call	conout
-		jp	init
+		call	out_crlf
+		jp	prompt
 
 
 
@@ -509,7 +525,8 @@ no_dot:		call	conout
 dump_end:
 		; store our updated/final address.
 		ld	(dump_address), hl
-		jp	monitor
+		call	out_crlf
+		jp	prompt
 
 
 
@@ -579,7 +596,7 @@ modify_byte:
 
 		; return? If so we're done
 		cp	CR
-		jp	z, monitor
+		jp	z, prompt
 
 		; OK, do we have a hex number?
 		dec	hl
@@ -816,15 +833,37 @@ goto3:		ld	a, (hl)
 		inc	hl
 		jr	goto3
 goto4:		call	hex_to_bc		; a: low
-		jr	c, goto_user0		; no hex -> no breakpoint
+		jr	c, goto_user		; no hex -> no breakpoint
 		or	b			; high
 		jr	z, goto_user		; 0000 -> no breakpoint
-		; Gaaaa bbbb -> prepare breakpoint
+		; Gaaaa bbbb -> set breakpoint
 		ld	(break_addr), bc
 		ld	a, (bc)
 		ld	(break_opc), a
 		ld	a, OPC_RST30
 		ld	(bc), a			; replace opcode with RST
+
+		; Check for 3rd arg (restorepoint address)
+		; Skip spaces
+goto5:		ld	a, (hl)
+		cp	SPC
+		jr	nz, goto6
+		inc	hl
+		jr	goto5
+goto6:		call	hex_to_bc		; a: low
+		jr	c, goto_user		; no hex -> no restorepoint
+		or	b			; high
+		jr	z, goto_user		; 0000 -> no restorepoint
+		; Gaaaa bbbb cccc -> prepare restorepoint
+		ld	(restore_addr), bc
+
+		ld	a, (bc)
+		ld	(restore_opc), a
+		ld	a, OPC_RST28
+		ld	(bc), a			; replace opcode with RST
+
+
+
 goto_user:
 		ld	a, (user_pc)
 		ld	b, a
@@ -878,7 +917,7 @@ breakpoint:
 		inc	hl
 		ld	d, (hl)				; DE = return address
 		inc	hl
-		ld	(user_sp), hl
+		ld	(user_sp), hl			; corrected user SP
 		dec	de				; point to RST 30h instruction
 		; Save as user PC
 		ld	(user_pc), de
@@ -891,8 +930,48 @@ breakpoint:
 		; Display status
 		call	display_regs
 
+		ld	a, (restore_addr)
+		ld	b, a
+		ld	a, (restore_addr+1)
+		or	b
+		jp	z, prompt		; restorepoint not set
+
+		ld	hl, (restore_addr)
+		ld	a, (hl)
+		ld	(restore_opc), a
+		ld	(hl), OPC_RST28		; replace opcode with RST
+
 		; Return to debug prompt
 		jp	prompt
+
+
+;--------------------------------------------------------------
+; RESTOREPOINT - entered via RST 28h
+; Restore original opcode here, set breakpoint again,
+;--------------------------------------------------------------
+;
+restorepoint:
+		push	af
+		push	hl
+		; Restore original byte where breakpoint was
+		ld	hl, (restore_addr)
+		ld	a, (restore_opc)
+		ld	(hl), a
+
+		ld	a, (break_addr)
+		ld	l, a
+		ld	a, (break_addr+1)
+		or	l
+		jr	z, rest_ret		; breakpoint not set
+
+		ld	hl, (break_addr)
+		ld	a, (hl)
+		ld	(break_opc), a
+		ld	(hl), OPC_RST30		; replace opcode with RST
+rest_ret:
+		pop	hl
+		pop	af
+		ret
 
 
 ;--------------------------------------------------------------
@@ -964,6 +1043,14 @@ display_regs:
 		call	conout
 		ld	hl, (user_sp)
 		call	out_word			; SP
+		ld	a, ' '
+		call	conout
+		ld	hl, (break_addr)
+		call	out_word
+		ld	a, ' '
+		call	conout
+		ld	hl, (restore_addr)
+		call	out_word
 		jp	out_crlf
 
 
@@ -1001,7 +1088,7 @@ restore_user_context:
 
 regs_msg1:	db	CR, LF
 		db	" A  F  BC   DE   HL  A' F'  BC'  DE'  HL' "
-		db	" IX   IY   I  R  PC   SP"
+		db	" IX   IY   I  R  PC   SP  BRKP REST"
 		db	CR, LF, 0
 
 
@@ -1019,6 +1106,9 @@ modify_address:
 
 break_addr:	dw	0
 break_opc:	db	0
+
+restore_addr:	dw	0
+restore_opc:	db	0
 
 ;--------------------------------------------------------------
 ; DATA AND VARIABLES
