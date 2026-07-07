@@ -27,6 +27,7 @@
 ;
 ;  Gaaaa		-> Goto address aaaa
 ;  Gaaaa bbbb		-> Goto address aaaa, set breakpoint at bbbb
+;  Gaaaa bbbb cccc	-> as above, set address where breakpoint is reactivated
 ;  G			-> Goto last breakpoint address
 ;
 ;  R			-> Show Register content
@@ -42,6 +43,9 @@
 ;
 ;  2026-07-06	Martin Homuth-Rosemann
 ;	add breakpoint handling
+;
+;  2026-07-07	Martin Homuth-Rosemann
+;	add optional breakpoint reactivation after triggering
 ;
 ;--------------------------------------------------------------
 
@@ -134,7 +138,7 @@ init1:		ld	(hl), a
 		ld	(28h), a		; at RST28
 		ld	hl, breakpoint
 		ld	(31h), hl
-		ld	hl, restorepoint
+		ld	hl, reactivpoint
 		ld	(29h), hl
 monitor:
 		call	out_crlf
@@ -146,16 +150,16 @@ monitor1:
 		ld	a, (break_opc) 		; get orginal opcode
 		ld	(hl), a			; restore it
 no_brk:
-		ld	hl, (restore_addr)
+		ld	hl, (reactiv_addr)
 		ld	a, h
-		or	l			; restorepoint set?
+		or	l			; reactivpoint set?
 		jr	z, no_rst		; no
-		ld	a, (restore_opc) 	; get orginal opcode
+		ld	a, (reactiv_opc) 	; get orginal opcode
 		ld	(hl), a			; restore it
 no_rst
 		ld	hl, 0
 		ld	(break_addr), hl	; clear breakpoint addr
-		ld	(restore_addr), hl	; clear restorepoint addr
+		ld	(reactiv_addr), hl	; clear reactivpoint addr
 		ld	(user_pc), hl		; clear user PC
 		; show the prompt
 prompt:		ld	a, '>'
@@ -251,18 +255,18 @@ bs_cant_delete:
 ; if we see input we don't recognize we show a message and return,
 ; otherwise we invoke the appropriate handler.
 ;
-;  S 				=> Show
-;  W 				=> Wozdump
+;  S 				=> Show memory
+;  W 				=> Wozdump memory
 ;  M 				=> Modify data
 ;  aaaa: dd dd dd ...		=> Modify data
 ;  G				=> Goto
-;  R				=> Register
-;  [A, B, C, D, E, H, L] xx	=> Set register
-;  [X, Y] xxxx			=> Set register IX or IY
+;  R				=> Register display
+;  [A, B, C, D, E, H, L] xx	=> Set 8 bit register
+;  [P, X, Y] xxxx		=> Set 16 bit register PC, IX or IY
 ;--------------------------------------------------------------
 ;
 process_input:
-		; XXXX: - check for colon
+		; XXXX: - check for colon (WozMon format)
 		; MUST come first due to commands A-F
 		ld	hl, input_buffer+4
 		ld	a, (hl)
@@ -279,7 +283,7 @@ process0:
 		jr	nz, process1
 		; handle CR as command repeat for some commands
 		ld	a, (last_cmd)
-		cp	'G'			; SHOW
+		cp	'G'			; GOTO
 		jr	z, process_repeat
 		cp	'S'			; SHOW
 		jr	z, process_repeat
@@ -310,13 +314,13 @@ process2:
 		cp	'W'
 		jp	z, dump_handler
 
-		; M == MODIFY
-		cp	'M'
-		jp	z, modify_handler
-
 		; G == GOTO
 		cp	'G'
 		jp	z, goto_handler
+
+		; M == MODIFY
+		cp	'M'
+		jp	z, modify_handler
 
 		; R == SHOW REGISTER
 		cp	'R'
@@ -825,10 +829,10 @@ goto_handler:
 		jr	c, goto_user
 		; Gaaaa -> save address for later jump via restore_user_context
 		ld	(user_pc), bc
+
 		; Check for 2nd arg (breakpoint address)
-		; Skip spaces
 goto3:		ld	a, (hl)
-		cp	SPC
+		cp	SPC			; Skip spaces
 		jr	nz, goto4
 		inc	hl
 		jr	goto3
@@ -843,26 +847,22 @@ goto4:		call	hex_to_bc		; a: low
 		ld	a, OPC_RST30
 		ld	(bc), a			; replace opcode with RST
 
-		; Check for 3rd arg (restorepoint address)
-		; Skip spaces
+		; Check for 3rd arg (reactivpoint address)
 goto5:		ld	a, (hl)
-		cp	SPC
+		cp	SPC			; Skip spaces
 		jr	nz, goto6
 		inc	hl
 		jr	goto5
 goto6:		call	hex_to_bc		; a: low
-		jr	c, goto_user		; no hex -> no restorepoint
+		jr	c, goto_user		; no hex -> no reactivpoint
 		or	b			; high
-		jr	z, goto_user		; 0000 -> no restorepoint
-		; Gaaaa bbbb cccc -> prepare restorepoint
-		ld	(restore_addr), bc
-
+		jr	z, goto_user		; 0000 -> no reactivpoint
+		; Gaaaa bbbb cccc -> prepare reactivpoint
+		ld	(reactiv_addr), bc
 		ld	a, (bc)
-		ld	(restore_opc), a
+		ld	(reactiv_opc), a
 		ld	a, OPC_RST28
 		ld	(bc), a			; replace opcode with RST
-
-
 
 goto_user:
 		ld	a, (user_pc)
@@ -930,15 +930,16 @@ breakpoint:
 		; Display status
 		call	display_regs
 
-		ld	a, (restore_addr)
+		; Check for address to reactivate the breakpoint
+		ld	a, (reactiv_addr)
 		ld	b, a
-		ld	a, (restore_addr+1)
+		ld	a, (reactiv_addr+1)
 		or	b
-		jp	z, prompt		; restorepoint not set
-
-		ld	hl, (restore_addr)
+		jp	z, prompt		; reactivpoint not set
+		; Prepare breakpoint reactivation
+		ld	hl, (reactiv_addr)
 		ld	a, (hl)
-		ld	(restore_opc), a
+		ld	(reactiv_opc), a
 		ld	(hl), OPC_RST28		; replace opcode with RST
 
 		; Return to debug prompt
@@ -946,29 +947,29 @@ breakpoint:
 
 
 ;--------------------------------------------------------------
-; RESTOREPOINT - entered via RST 28h
-; Restore original opcode here, set breakpoint again,
+; REACTIVPOINT - entered via RST 28h
+; Restore original opcode here, reactivate breakpoint
 ;--------------------------------------------------------------
 ;
-restorepoint:
+reactivpoint:
 		push	af
 		push	hl
-		; Restore original byte where breakpoint was
-		ld	hl, (restore_addr)
-		ld	a, (restore_opc)
+		; Restore original byte where reactivpoint was
+		ld	hl, (reactiv_addr)
+		ld	a, (reactiv_opc)
 		ld	(hl), a
-
+		; Check for active breakpoint
 		ld	a, (break_addr)
 		ld	l, a
 		ld	a, (break_addr+1)
 		or	l
-		jr	z, rest_ret		; breakpoint not set
-
+		jr	z, reactiv_ret		; breakpoint not set
+		; Reactivate breakpoint
 		ld	hl, (break_addr)
 		ld	a, (hl)
 		ld	(break_opc), a
 		ld	(hl), OPC_RST30		; replace opcode with RST
-rest_ret:
+reactiv_ret:
 		pop	hl
 		pop	af
 		ret
@@ -1049,7 +1050,7 @@ display_regs:
 		call	out_word
 		ld	a, ' '
 		call	conout
-		ld	hl, (restore_addr)
+		ld	hl, (reactiv_addr)
 		call	out_word
 		jp	out_crlf
 
@@ -1088,7 +1089,7 @@ restore_user_context:
 
 regs_msg1:	db	CR, LF
 		db	" A  F  BC   DE   HL  A' F'  BC'  DE'  HL' "
-		db	" IX   IY   I  R  PC   SP  BRKP REST"
+		db	" IX   IY   I  R  PC   SP  BRKP RACT"
 		db	CR, LF, 0
 
 
@@ -1107,8 +1108,8 @@ modify_address:
 break_addr:	dw	0
 break_opc:	db	0
 
-restore_addr:	dw	0
-restore_opc:	db	0
+reactiv_addr:	dw	0
+reactiv_opc:	db	0
 
 ;--------------------------------------------------------------
 ; DATA AND VARIABLES

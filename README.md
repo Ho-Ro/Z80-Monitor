@@ -40,25 +40,31 @@ I started with the command line parser and some standard functions, with this sy
   - `AAAA: DD DD ...` - modify mem at `AAAA` using WozMon fmt (see SHOW).
 
 - **GOTO** program location
-
   - `GAAAA` - goto program at `AAAA`.
-  - `GAAAA BBBB` - goto program at `AAAA` and set a breakpoint at `BBBB`.
+  - `GAAAA BBBB` - goto program at `AAAA` and set a breakpoint at `BBBB`. The breakpoint is deactivated after  triggering.
+  - `GAAAA BBBB CCCC` - as above, but reactivate the breakpoint at address `BBBB` when reaching address `CCCC`.
+
+    Breakpoints and reactivation points are implemented by replacing the opcode at `BBBB` and `CCCC` with `RST` instructions.  
+    This only works if the addresses `BBBB` and `CCCC` point to the first byte of the opcode (M1).
+
   - `G` - resume execution from user PC unless it is 0.
 
 - **REGISTER** display
 
   - `R` - show the user register including the 2nd register set `AF'`, `BC'`, `DE'`, `HL'`
 
-- **SET REGISTER** for following `G` command
+- **SET REGISTER** prepare for the following `G` command
 
   - `A dd` - set register `A`
-  - `F dd` - set register `F`
   - `B dd` - set register `B`
   - `C dd` - set register `C`
   - `D dd` - set register `D`
   - `E dd` - set register `E`
   - `H dd` - set register `H`
   - `L dd` - set register `L`
+  - `F dd` - set flags
+  - `I dd` - set interrupt vector register
+  - `P dddd` - set program counter
   - `X dddd` - set register `IX`
   - `Y dddd` - set register `IY`
 
