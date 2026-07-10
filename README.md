@@ -15,46 +15,55 @@ monitor with extended command set.
 happens on my Linux machine using [zxcc](https://github.com/Ho-Ro/ZXCC) or alternatively
 [tnylpo](https://github.com/Ho-Ro/tnylpo) as CP/M emulator. During development the monitor
 is an CP/M program to simplify the testing - it can easily switched to a standalone program
-in ROM. The only two HW-related functions are conin (wait for char and return it in register A)
-and conout (output char in register A). 
+in ROM. The only two HW-related functions are
+
+- **conin** (wait for char and return it in register A)
+- **conout** (output char in register A)
+
 The typical use case for Z80 SBCs is the combination with a terminal program running on the PC
 that connects to the serial port of the SBC. So the simplest way of program storage is to copy
 it from or to the terminal screen and store it on the PC. Therefore I decided to support the
 [WozMon format](https://github.com/Ho-Ro/Z80-MBC2/blob/main/WozMon/README.md) for simple data storage.
 
 ### Commands
-I started with the command line parser and some standard functions, with this syntax:
+The monitor program offers these functions with the following syntax:
 
     <CMD><ADDRESS>[ <ARG> <ARG> ...]<RETURN>
 
 - **VIEW** memory content
-  - `VAAAA` - view 16 bytes at `AAAA` as hex and ASCII (`AAAA  DD DD ...  CC ..`).
-  - `V` - (or CR alone) show the next 16 bytes after previous dump.
-  - `WAAAA` - dump 16 bytes at `AAAA` in WozMon fmt (`AAAA: DD DD ...`).
-  - `W` - (or CR alone) dump the next 16 bytes after previous dump in WozMon fmt.
+  - `VAAAA` - View 16 bytes at `AAAA` as hex and ASCII (`AAAA  DD DD ...  CC ..`).
+  - `V` (or CR alone) - View the next 16 bytes after previous dump.
+  - `WAAAA` - Dump 16 bytes at `AAAA` in WozMon fmt (`AAAA: DD DD ...`).
+  - `W` (or CR alone) - Dump the next 16 bytes after previous dump in WozMon fmt.
 
 - **MODIFY** memory content
-  - `MAAAA DD DD ...` - modify mem at `AAAA`, **no space between `'M'` and the address!**.
-  - `M DD DD ...` - modify next mem bytes.
-  - `AAAA: DD DD ...` - modify mem at `AAAA` using WozMon fmt (see SHOW).
+  - `MAAAA DD DD ...` - Modify mem at `AAAA`, **no space between `'M'` and the address!**.
+  - `M DD DD ...` - Modify next mem bytes.
+  - `AAAA: DD DD ...` - Modify mem at `AAAA` using WozMon fmt (see SHOW).
 
 - **GOTO** program location
-  - `GAAAA` - goto program at `AAAA`.
-  - `GAAAA BBBB` - goto program at `AAAA` and set a breakpoint at `BBBB`. The breakpoint is deactivated after  triggering.
-  - `GAAAA BBBB CCCC` - as above, but reactivate the breakpoint at address `BBBB` when reaching address `CCCC`.
+  - `GAAAA` - Goto program at `AAAA`.
+  - `G` - Goto program counter of user context, e.g. resume from last breakpoint.
+  - `G0` - Exit to CP/M or restart the Z80-MBC2 monitor.
 
-    Breakpoints and reactivation points are implemented by replacing the opcode at `BBBB` and `CCCC` with `RST` instructions.  
-    This only works if the addresses `BBBB` and `CCCC` point to the first byte of the opcode (M1).
-
-  - `G` - resume execution from user PC unless it is 0.
-
-- **KILL** breakpoint and reactivation point
-  - `K` - do it also before setting a new breakpoint address.
+- **BREAKPOINT** set or clear
+  - `K` - clear breaKpoint.
+  - `K0` - clear breaKpoint.
+  - `KAAAA` - set breaKpoint at `AAAA`.
+  - `KAAAA BBBB` - set breaKpoint at `AAAA` and reactivate it at `BBBB`.
+    Breakpoints and reactivation points are implemented by replacing the opcode at `AAAA` and `BBBB` with `RST` instructions.  
+    This only works if the addresses `AAAA` and `BBBB` point to the first byte of the opcode (M1).
 
 - **REGISTER** display
-  - `R` - show the user register including the 2nd register set `AF'`, `BC'`, `DE'`, `HL'`
+  - `R` - show the user register including the 2nd register set `AF'`, `BC'`, `DE'`, `HL'` and, if applicable, the address of the breakpoint and its recovery.
 
-- **SET REGISTER** prepare for the following `G` command
+```
+           A  F  BC   DE   HL  A' F'  BC'  DE'  HL'  IX   IY   I  R  PC   SP
+          DE 8B 0600 0003 C504 55 00 0000 0000 0000 0000 0000 00 1B 100C 0740
+          Sz...p.C             sz...p.c                      BrkPt: 100C/100D
+```
+
+- **SET REGISTER** prepare user context for the following `G` command
   - `A dd` - set register `A`
   - `B dd` - set register `B`
   - `C dd` - set register `C`
