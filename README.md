@@ -27,14 +27,13 @@ I started with the command line parser and some standard functions, with this sy
 
     <CMD><ADDRESS>[ <ARG> <ARG> ...]<RETURN>
 
-- **SHOW** memory content
-  - `SAAAA` - show 16 bytes at `AAAA` as hex and ASCII (`AAAA  DD DD ...  CC ..`).
-  - `S` - (or CR alone) show the next 16 bytes after previous dump.
+- **VIEW** memory content
+  - `VAAAA` - view 16 bytes at `AAAA` as hex and ASCII (`AAAA  DD DD ...  CC ..`).
+  - `V` - (or CR alone) show the next 16 bytes after previous dump.
   - `WAAAA` - dump 16 bytes at `AAAA` in WozMon fmt (`AAAA: DD DD ...`).
   - `W` - (or CR alone) dump the next 16 bytes after previous dump in WozMon fmt.
 
 - **MODIFY** memory content
-
   - `MAAAA DD DD ...` - modify mem at `AAAA`, **no space between `'M'` and the address!**.
   - `M DD DD ...` - modify next mem bytes.
   - `AAAA: DD DD ...` - modify mem at `AAAA` using WozMon fmt (see SHOW).
@@ -49,12 +48,13 @@ I started with the command line parser and some standard functions, with this sy
 
   - `G` - resume execution from user PC unless it is 0.
 
-- **REGISTER** display
+- **KILL** breakpoint and reactivation point
+  - `K` - do it also before setting a new breakpoint address.
 
+- **REGISTER** display
   - `R` - show the user register including the 2nd register set `AF'`, `BC'`, `DE'`, `HL'`
 
 - **SET REGISTER** prepare for the following `G` command
-
   - `A dd` - set register `A`
   - `B dd` - set register `B`
   - `C dd` - set register `C`
@@ -65,6 +65,7 @@ I started with the command line parser and some standard functions, with this sy
   - `F dd` - set flags
   - `I dd` - set interrupt vector register
   - `P dddd` - set program counter
+  - `S dddd` - set stack pointer
   - `X dddd` - set register `IX`
   - `Y dddd` - set register `IY`
 

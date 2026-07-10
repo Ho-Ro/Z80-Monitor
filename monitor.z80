@@ -14,8 +14,8 @@
 ; Built-in commands
 ;
 ;
-;  Saaaa		-> Show 16 bytes of RAM at address aaaa
-;  S			-> Show next 16 bytes (also CR alone)
+;  Vaaaa		-> View 16 bytes of Memory at address aaaa
+;  V			-> View next 16 bytes (also CR alone)
 ;
 ;  Waaaa		-> Show 16 bytes in Wozmon format (aaaa: dd dd ...)
 ;  W			-> Show next 16 bytes (also CR alone)
@@ -25,12 +25,15 @@
 ;
 ;  aaaa: dd dd dd ...	-> Modify data byte(s) dd at address aaaa (WozMon fmt)
 ;
+;  G			-> Goto address in user context, e.g. last breakpoint
 ;  Gaaaa		-> Goto address aaaa
-;  Gaaaa bbbb		-> Goto address aaaa, set breakpoint at bbbb
-;  Gaaaa bbbb cccc	-> as above, set address where breakpoint is reactivated
-;  G			-> Goto last breakpoint address
+;  G0			-> Exit to CP/M or restart the Z80-MBC2 monitor
 ;
-;  R			-> Show Register content
+;  K or K0		-> Clear breaKpoint
+;  Kaaaa		-> Set breaKpoint at aaaa
+;  Kaaaa bbbb		-> as above, breaKpoint is reactivated at bbbb
+;
+;  R			-> Show Register contents
 ;
 ;  [A, B, C, D, E, H, L] dd	Set 8 bit register
 ;  [X, Y] dddd			Set 16 bit register IX or iY
@@ -46,6 +49,9 @@
 ;
 ;  2026-07-07	Martin Homuth-Rosemann
 ;	add optional breakpoint reactivation after triggering
+;
+;  2026-07-10	Martin Homuth-Rosemann
+;	add cmd K to handle breakpoint and reactivation
 ;
 ;--------------------------------------------------------------
 
@@ -255,14 +261,14 @@ bs_cant_delete:
 ; if we see input we don't recognize we show a message and return,
 ; otherwise we invoke the appropriate handler.
 ;
-;  S 				=> Show memory
+;  V 				=> View memory
 ;  W 				=> Wozdump memory
 ;  M 				=> Modify data
 ;  aaaa: dd dd dd ...		=> Modify data
 ;  G				=> Goto
 ;  R				=> Register display
-;  [A, B, C, D, E, H, L] xx	=> Set 8 bit register
-;  [P, X, Y] xxxx		=> Set 16 bit register PC, IX or IY
+;  [A, B, C, D, E, H, L, I] xx	=> Set 8 bit register
+;  [P, S, X, Y] xxxx		=> Set 16 bit register PC, SP, IX or IY
 ;--------------------------------------------------------------
 ;
 process_input:
@@ -285,7 +291,7 @@ process0:
 		ld	a, (last_cmd)
 		cp	'G'			; GOTO
 		jr	z, process_repeat
-		cp	'S'			; SHOW
+		cp	'V'			; VIEW
 		jr	z, process_repeat
 		cp	'W'			; WOZDUMP
 		jr	z, process_repeat
@@ -306,8 +312,8 @@ process1:
 process2:
 		ld	a, (hl)			; cmd char
 
-		; S == SHOW
-		cp	'S'
+		; V == VIEW
+		cp	'V'
 		jp	z, dump_handler
 
 		; W == WOZDUMP
@@ -322,7 +328,14 @@ process2:
 		cp	'M'
 		jp	z, modify_handler
 
-		; R == SHOW REGISTER
+		; K == BREAKPOINT
+		cp	'K'
+		jr	nz, process_R
+		call	break_handler
+		jp	prompt
+
+process_R:
+		; R == VIEW REGISTER
 		cp	'R'
 		jr	nz, process_A
 		call	display_regs
@@ -366,7 +379,7 @@ process_D:
 		cp	'D'
 		jr	nz, process_E
 		call	get_first_arg
-		jr	c, cmd_error
+		jp	c, cmd_error
 		ld	(user_de+1), a
 		jp	prompt
 process_E:
@@ -420,10 +433,18 @@ process_IY:
 process_PC:
 		; P == user PC
 		cp	'P'
-		jr	nz, cmd_error
+		jr	nz, process_SP
 		call	get_first_arg
 		jr	c, cmd_error
 		ld	(user_pc), bc
+		jp	prompt
+process_SP:
+		; S == user SP
+		cp	'S'
+		jr	nz, cmd_error
+		call	get_first_arg
+		jr	c, cmd_error
+		ld	(user_sp), bc
 		jp	prompt
 		;
 		; Unknown command - show error message
@@ -462,8 +483,8 @@ gfa2:		call	hex_to_bc
 ;
 ; SHOW 16 bytes from the current dump_address
 ;
-; We're called with either "S1234" or "W1234" if we should start at the given offset
-; or with "S" or "W" (or CR alone) to keep going where we left off.
+; Called with either "V1234" or "W1234" to start at the given offset
+; or with "V" or "W" (or CR alone) to keep going where we left off.
 ;
 ;--------------------------------------------------------------
 ;
@@ -478,10 +499,10 @@ dump_next:
 		call	out_word
 		ld	a, (last_cmd)
 		cp	'W'
-		jr	nz, dump_fmt
+		jr	nz, view_fmt
 		ld	a, ':'
 		jr	woz_fmt
-dump_fmt:
+view_fmt:
 		ld	a, ' '
 woz_fmt:
 		call	conout
@@ -565,6 +586,7 @@ woz_input:
 ;  M0123 01 02 03 04 0F
 ;
 ; i.e. "M<address> byte1 byte2 .. byteN"
+; There must be NO SPACE between `M` and `<address>`!
 ;
 ; If there is no address keep going from the last time,
 ; which means this works as you expect:
@@ -819,7 +841,10 @@ conin:
 
 ;--------------------------------------------------------------
 ;
-; GOTO is invoked with the start address and an optional breakpoint address
+; GOTO is invoked with the (optional) start address
+; G - goto user PC
+; G 0 - exit to CP/M, restart on  Z80-MBC2
+; G aaaa - goto aaaa
 ;
 ;--------------------------------------------------------------
 ;
@@ -827,53 +852,121 @@ goto_handler:
 		call get_first_arg
 		; G alone, no arg -> goto address from user context
 		jr	c, goto_user
+		or	b			; G0 ?
+	if	CPM
+		jp	z, 0
+	else
+		jp	z, init
+	endif
 		; Gaaaa -> save address for later jump via restore_user_context
 		ld	(user_pc), bc
-
-		; Check for 2nd arg (breakpoint address)
-goto3:		ld	a, (hl)
-		cp	SPC			; Skip spaces
-		jr	nz, goto4
-		inc	hl
-		jr	goto3
-goto4:		call	hex_to_bc		; a: low
-		jr	c, goto_user		; no hex -> no breakpoint
-		or	b			; high
-		jr	z, goto_user		; 0000 -> no breakpoint
-		; Gaaaa bbbb -> set breakpoint
-		ld	(break_addr), bc
-		ld	a, (bc)
-		ld	(break_opc), a
-		ld	a, OPC_RST30
-		ld	(bc), a			; replace opcode with RST
-
-		; Check for 3rd arg (reactivpoint address)
-goto5:		ld	a, (hl)
-		cp	SPC			; Skip spaces
-		jr	nz, goto6
-		inc	hl
-		jr	goto5
-goto6:		call	hex_to_bc		; a: low
-		jr	c, goto_user		; no hex -> no reactivpoint
-		or	b			; high
-		jr	z, goto_user		; 0000 -> no reactivpoint
-		; Gaaaa bbbb cccc -> prepare reactivpoint
-		ld	(reactiv_addr), bc
-		ld	a, (bc)
-		ld	(reactiv_opc), a
-		ld	a, OPC_RST28
-		ld	(bc), a			; replace opcode with RST
-
 goto_user:
 		ld	a, (user_pc)
 		ld	b, a
 		ld	a, (user_pc+1)
 		or	b
 		jp	z, cmd_error		; error if user PC not set
-goto_user0:	; come here with Gxxxx to allow G0
-		; set user stack, register, jp to (user_pc)
+		; set user stack, register, breakpoint; jp to (user_pc)
 		jp	restore_user_context
 
+
+;--------------------------------------------------------------
+;
+; set/reset BREAKPOINT
+; K - reset breakpoint
+; K 0 - reset breakpoint
+; K aaaa - set breakpoint at aaaa
+; K aaaa bbbb - set breakpoint at aaaa, restore at bbbb
+;
+;--------------------------------------------------------------
+;
+break_handler:
+		call get_first_arg
+		; K alone, no arg -> kill breakpoint
+		jr	c, kill_brk
+		or	b
+		jr	z, kill_brk
+		; Kaaaa -> set breakpoint
+		ld	(break_addr), bc
+brk1:		ld	a, (hl)
+		cp	SPC			; Skip spaces
+		jr	nz, brk2
+		inc	hl
+		jr	brk1
+brk2:		call	hex_to_bc		; a: low
+		ret	c			; no hex -> no reactivpoint
+		or	b			; high
+		ret	z			; 0000 -> no reactivpoint
+		; Kaaaa bbbb -> set reactivpoint
+		ld	(reactiv_addr), bc
+		ret
+kill_brk:
+		ld	bc, 0
+		ld	(break_addr), bc
+		ld	(reactiv_addr), bc
+		ret
+
+
+;--------------------------------------------------------------
+;
+; RESTORE_USER_CONTEXT - Set up registers and breakpoint, jump to user code
+;
+;--------------------------------------------------------------
+restore_user_context:
+		ex	af, af'
+		ld	hl, (user_af2)
+		push	hl
+		pop	af
+		ex	af, af'
+		ld	hl, (user_af)
+		push	hl
+		pop	af
+		; restore user SP
+		ld	sp, (user_sp)
+		; restore user PC
+		ld	hl, (user_pc)
+		; put it on stack for indirect jump via `RET`
+		push	hl
+
+		; prepare breakpoint if set
+		ld	bc, (break_addr)
+		ld	a, b
+		or	c
+		jr	z, rest_regs		; no brkpt
+		ld	hl, (user_pc)
+		sbc	hl, bc
+		jr	z, chk_react		; at brkpt, set (opt.) reactivpoint
+		; exchange opcode with RST
+		ld	a, (bc)
+		ld	(break_opc), a		; save original opcode
+		ld	a, OPC_RST30
+		ld	(bc), a			; replace opcode with RST
+		jr	rest_regs
+
+chk_react:	; prepare reactivpoint if at breakpoint
+		ld	hl, (reactiv_addr)
+		ld	a, h
+		or	l
+		jr	z, rest_regs		; no reactivpoint
+		; exchange opcode with RST
+		ld	a, (hl)
+		ld	(reactiv_opc), a	; save original opcode
+		ld	a, OPC_RST28
+		ld	(hl), a			; replace opcode with RST
+rest_regs:
+		; restore user register
+		ld	iy, (user_iy)
+		ld	ix, (user_ix)
+		exx
+		ld	hl, (user_hl2)
+		ld	de, (user_de2)
+		ld	bc, (user_bc2)
+		exx
+		ld	hl, (user_hl)
+		ld	de, (user_de)
+		ld	bc, (user_bc)
+		; jump to the pushed address (user PC)
+		ret
 
 ;--------------------------------------------------------------
 ; BREAKPOINT - entered via RST 30h
@@ -928,33 +1021,20 @@ breakpoint:
 		ld	(hl), a
 
 		; Display status
-		call	display_regs
-
-		; Check for address to reactivate the breakpoint
-		ld	a, (reactiv_addr)
-		ld	b, a
-		ld	a, (reactiv_addr+1)
-		or	b
-		jp	z, prompt		; reactivpoint not set
-		; Prepare breakpoint reactivation
-		ld	hl, (reactiv_addr)
-		ld	a, (hl)
-		ld	(reactiv_opc), a
-		ld	(hl), OPC_RST28		; replace opcode with RST
+brk_regs:	call	display_regs
 
 		; Return to debug prompt
 		jp	prompt
 
 
 ;--------------------------------------------------------------
-; REACTIVPOINT - entered via RST 28h
-; Restore original opcode here, reactivate breakpoint
+; REACTIVPOINT - entered via RST 28H
+; Restore original opcode here, reactivate breakpoint, go on
 ;--------------------------------------------------------------
 ;
-reactivpoint:
-		push	af
+reactivpoint:	push	af
 		push	hl
-		; Restore original byte where reactivpoint was
+		; Restore original byte where RST 28H was
 		ld	hl, (reactiv_addr)
 		ld	a, (reactiv_opc)
 		ld	(hl), a
@@ -968,10 +1048,15 @@ reactivpoint:
 		ld	hl, (break_addr)
 		ld	a, (hl)
 		ld	(break_opc), a
-		ld	(hl), OPC_RST30		; replace opcode with RST
+		ld	(hl), OPC_RST30		; replace opcode with RST 30H
 reactiv_ret:
 		pop	hl
 		pop	af
+		; return to the original opcode that was replaced by RST 28H
+		ex	(sp), hl
+		dec	hl
+		ex	(sp), hl
+
 		ret
 
 
@@ -1031,11 +1116,11 @@ display_regs:
 		ld	a, ' '
 		call	conout
 		ld	a, (user_i)
-		call	out_byte
+		call	out_byte			; I
 		ld	a, ' '
 		call	conout
 		ld	a, (user_r)
-		call	out_byte
+		call	out_byte			; R
 		ld	a, ' '
 		call	conout
 		ld	hl, (user_pc)
@@ -1044,54 +1129,86 @@ display_regs:
 		call	conout
 		ld	hl, (user_sp)
 		call	out_word			; SP
-		ld	a, ' '
-		call	conout
+		call	out_crlf
+		ld	a, (user_af)
+		call	display_flags
+		ld	hl, spaces13
+		call	out_string
+		ld	a, (user_af2)
+		call	display_flags
+		ld	hl, (break_addr)
+		ld	a, h
+		or	l
+		jr	z, disp_end
+		ld	hl, spaces13
+		call	out_string
+		ld	hl, spaces8
+		call	out_string
+		ld	hl, brk_msg
+		call	out_string
 		ld	hl, (break_addr)
 		call	out_word
-		ld	a, ' '
+		ld	a, '/'
 		call	conout
 		ld	hl, (reactiv_addr)
 		call	out_word
+disp_end:
 		jp	out_crlf
 
 
 ;--------------------------------------------------------------
-; RESTORE_USER_CONTEXT - Set up registers and jump to user code
+; DISPLAY_FLAGS - Show the relevant flags Sign, Zero, P/V, and CY
+; All other flags are ignored und displayed as '.'
+; Upper case: flag set
+; Lower case: flag not set
 ;--------------------------------------------------------------
-restore_user_context:
-		ex	af, af'
-		ld	hl, (user_af2)
-		push	hl
-		pop	af
-		ex	af, af'
-		ld	hl, (user_af)
-		push	hl
-		pop	af
-		ld	sp, (user_sp)		; restore user stack
-		ld	hl, (user_pc)
-		push	hl			; put on stack for indirect jump
-		ld	iy, (user_iy)
-		ld	ix, (user_ix)
-		exx
-		ld	hl, (user_hl2)
-		ld	de, (user_de2)
-		ld	bc, (user_bc2)
-		exx
-		ld	hl, (user_hl)
-		ld	de, (user_de)
-		ld	bc, (user_bc)
-		ret				; jump to pushed address (user_pc)
+display_flags:
+		ld	b, a
+		bit	7, b
+		ld	a, 's'
+		jr	z, flagZ
+		ld	a, 'S'
+flagZ:		call	conout
+		bit	6, b
+		ld	a, 'z'
+		jr	z, flag5
+		ld	a, 'Z'
+flag5:		call	conout
+		ld	a, '.'
+flagH:		call	conout
+		ld	a, '.'
+flag3:		call	conout
+		ld	a, '.'
+flagP:		call	conout
+		bit	2, b
+		ld	a, 'p'
+		jr	z, flagN
+		ld	a, 'P'
+flagN		call	conout
+		ld	a, '.'
+flagC:		call	conout
+		bit	0, b
+		ld	a, 'c'
+		jr	z, flagrdy
+		ld	a, 'C'
+flagrdy:	jp	conout
 
 
-;
+;--------------------------------------------------------------
 ; DATA
-;
+;--------------------------------------------------------------
+
+spaces13:	db	"     ",
+spaces8:	db	"    ",
+spaces4:	db	"    ", 0
+
 
 regs_msg1:	db	CR, LF
 		db	" A  F  BC   DE   HL  A' F'  BC'  DE'  HL' "
-		db	" IX   IY   I  R  PC   SP  BRKP RACT"
+		db	" IX   IY   I  R  PC   SP"
 		db	CR, LF, 0
 
+brk_msg:	db	" BrkPt: ", 0
 
 ; last entered command character (for cmd repeat with CR only)
 last_cmd:
@@ -1111,8 +1228,9 @@ break_opc:	db	0
 reactiv_addr:	dw	0
 reactiv_opc:	db	0
 
+
 ;--------------------------------------------------------------
-; DATA AND VARIABLES
+; USER CONTEXT
 ;--------------------------------------------------------------
 
 		;org	($+0fh) and 0fff0h
@@ -1133,9 +1251,9 @@ user_iy:	dw	0
 user_pc:	dw	0
 eser_end:
 
-;
+;--------------------------------------------------------------
 ; BSS
-;
+;--------------------------------------------------------------
 
 		org	($+0fh) and 0fff0h
 

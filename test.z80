@@ -27,8 +27,6 @@ test1:
 		dec	a
 		inc	hl
 		call	test_sub
-		nop
-		nop
 		djnz	test1
 
 		call	out_word
@@ -41,4 +39,4 @@ test_sub:
 		ret
 
 
-testready:	db	CR, LF, "READY", CR, LF, 0
+testready:	db	" READY", 0
