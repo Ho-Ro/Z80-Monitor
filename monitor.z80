@@ -198,7 +198,19 @@ to_upper:
 		and	5fh
 is_upper:
 
-		; add to line
+		; guard against a line longer than the buffer
+		push	hl
+		push	de
+		ld	de, input_buffer_end
+		or	a
+		sbc	hl, de
+		pop	de
+		pop	hl
+		jr	c, store_char		; room left
+		cp	CR
+		jr	nz, mon_inp_loop	; full and not CR -> ignore
+store_char:
+		; add to line (BDOS function 1 has already echoed it)
 		ld	(hl),a
 
 		; was it return?  If so process
@@ -272,12 +284,18 @@ bs_cant_delete:
 ;--------------------------------------------------------------
 ;
 process_input:
-		; XXXX: - check for colon (WozMon format)
+		; <addr>: - look for a colon (WozMon format)
 		; MUST come first due to commands A-F
-		ld	hl, input_buffer+4
+		ld	hl, input_buffer
+scan_woz:
 		ld	a, (hl)
 		cp	':'
-		jr	nz, process0		; ok, check one-char commands
+		jr	z, found_woz
+		cp	CR
+		jr	z, process0		; ok, check one-char commands
+		inc	hl
+		jr	scan_woz
+found_woz:
 		ld	(hl), ' '		; convert to hex separated by space
 		call	out_crlf
 		jp	woz_input
@@ -459,8 +477,9 @@ cmd_error:
 
 ;--------------------------------------------------------------
 ;
-; get_first_arg - skip command and optional spaces,
-; return arg value in BC or CY set for error
+; get_first_arg - skip command and optional spaces
+; get_next_arg  - skip spaces
+; return arg value in BC and A, or CY set for error
 ;
 ;--------------------------------------------------------------
 ;
@@ -469,13 +488,13 @@ get_first_arg:
 		; so we start looking at the next character.
 		ld	hl, input_buffer+1
 		; Skip spaces.
-gfa1:		ld	a, (hl)
+get_next_arg:	ld	a, (hl)
 		cp	SPC
-		jr	nz, gfa2
+		jr	nz, get_arg_rdy
 		inc	hl
-		jr	gfa1
+		jr	get_next_arg
 		; Read the address to call into BC
-gfa2:		call	hex_to_bc
+get_arg_rdy:	call	hex_to_bc
 		ret
 
 
@@ -574,7 +593,9 @@ woz_input:
 		call	hex_to_bc
 		jp	c, cmd_error
 		ld	(modify_address), bc
-		ld	hl,input_buffer+6
+		ld	a, 1
+		ld	(modify_valid), a
+		; HL points at the space that replaced the colon
 		jr	modify_byte
 
 ;--------------------------------------------------------------
@@ -605,12 +626,20 @@ modify_handler:
 		; given, so we keep appending bytes to the address set previously.
 		ld	a, (hl)
 		cp	' '
-		jr	z, modify_byte
+		jr	z, modify_cont
 
 		; OK we expect an (ASCII) address at (HL) - Read it into BC.
 		call	hex_to_bc
 		jp	c, cmd_error
 		ld	(modify_address), bc
+		ld	a, 1
+		ld	(modify_valid), a
+		jr	modify_byte
+modify_cont:
+		; no address given: continue from last time, if any
+		ld	a, (modify_valid)
+		or	a
+		jp	z, cmd_error
 modify_byte:
 		; HL contains the a string.  Get the next byte
 		ld	a, (hl)
@@ -647,7 +676,7 @@ modify_byte:
 ; Convert 1..4 hexadecimal digits to 16-bit value.
 ;
 ; Entry:
-;       HL -> ASCII string terminated by CR, SPC or non-hex digit
+;       HL -> ASCII string terminated by CR or SPC
 ;
 ; Exit (success):
 ;       BC = value
@@ -692,7 +721,10 @@ done:
 		ld	c,l
 		ex	de,hl				; HL -> terminator
 		ld	a, c
+		pop	de
+		ret
 hex_err:
+		ex	de,hl				; HL -> bad char
 		pop	de
 		ret
 
@@ -758,9 +790,9 @@ out_string:
 		jr	out_string
 
 out_crlf:
-		ld	a, 0dh
+		ld	a, CR
 		call	conout
-		ld	a, 0ah
+		ld	a, LF
 		jp	conout
 
 
@@ -782,9 +814,8 @@ out_byte:
 		pop	af
 out_nibble:
 		and	0Fh
-		add 	a,90h
-		daa
-		adc	a,40h
+		cp	10
+		sbc	69h
 		daa
 
 conout:
@@ -829,7 +860,7 @@ conin:
 		push	bc
 		push	de
 		push	hl
-		ld	c, 1
+		ld	c, 1			; console input, blocks (cooperative)
 		call	bdos
 		pop	hl
 		pop	de
@@ -860,6 +891,9 @@ goto_handler:
 	endif
 		; Gaaaa -> save address for later jump via restore_user_context
 		ld	(user_pc), bc
+		call	get_next_arg
+		jr	c, goto_user
+		call	brk_hndlr1
 goto_user:
 		ld	a, (user_pc)
 		ld	b, a
@@ -881,26 +915,25 @@ goto_user:
 ;--------------------------------------------------------------
 ;
 break_handler:
-		call get_first_arg
+		call	clr_brk		; clear old breakpoint
+		call	get_first_arg
 		; K alone, no arg -> kill breakpoint
-		jr	c, kill_brk
-		or	b
-		jr	z, kill_brk
-		; Kaaaa -> set breakpoint
-		ld	(break_addr), bc
-brk1:		ld	a, (hl)
-		cp	SPC			; Skip spaces
-		jr	nz, brk2
-		inc	hl
-		jr	brk1
-brk2:		call	hex_to_bc		; a: low
+		ret	c			; K -> clear breakpoint
+brk_hndlr1:	or	b
+		ret	z			; K0 -> clear breakpoint
+		ld	(break_addr), bc	; Kaaaa -> set breakpoint
+		push	bc
+		ld	bc, 0
+		ld	(reactiv_addr), bc	; drop any previous reactivpoint
+		pop	bc
+		call	get_next_arg		; a: low
 		ret	c			; no hex -> no reactivpoint
 		or	b			; high
-		ret	z			; 0000 -> no reactivpoint
-		; Kaaaa bbbb -> set reactivpoint
-		ld	(reactiv_addr), bc
+		ret	z			; Kaaa 0 -> no reactivpoint
+
+		ld	(reactiv_addr), bc	; Kaaaa bbbb -> set reactivpoint
 		ret
-kill_brk:
+clr_brk:
 		ld	bc, 0
 		ld	(break_addr), bc
 		ld	(reactiv_addr), bc
@@ -913,21 +946,6 @@ kill_brk:
 ;
 ;--------------------------------------------------------------
 restore_user_context:
-		ex	af, af'
-		ld	hl, (user_af2)
-		push	hl
-		pop	af
-		ex	af, af'
-		ld	hl, (user_af)
-		push	hl
-		pop	af
-		; restore user SP
-		ld	sp, (user_sp)
-		; restore user PC
-		ld	hl, (user_pc)
-		; put it on stack for indirect jump via `RET`
-		push	hl
-
 		; prepare breakpoint if set
 		ld	bc, (break_addr)
 		ld	a, b
@@ -955,6 +973,23 @@ chk_react:	; prepare reactivpoint if at breakpoint
 		ld	(hl), a			; replace opcode with RST
 rest_regs:
 		; restore user register
+		ld	a, (user_i)
+		ld	i, a
+		ex	af, af'
+		ld	hl, (user_af2)
+		push	hl
+		pop	af
+		ex	af, af'
+		ld	hl, (user_af)
+		push	hl
+		pop	af
+		; restore user stack
+		ld	sp, (user_sp)
+		; restore user PC
+		ld	hl, (user_pc)
+		; put it on stack for indirect jump via RET
+		push	hl
+
 		ld	iy, (user_iy)
 		ld	ix, (user_ix)
 		exx
@@ -977,31 +1012,30 @@ breakpoint:
 		; Save complete user context
 		ld	(user_sp), sp
 		ld	sp, debug_stack			; switch to debug stack
-		push	iy
-		push	ix
-		push	hl
-		push	de
-		push	bc
-		push	af
+		ld	(user_iy), iy
+		ld	(user_ix), ix
 		exx					; save 2nd reg set
-		push	hl
-		push	de
-		push	bc
+		ld	(user_hl2), hl
+		ld	(user_de2), de
+		ld	(user_bc2), bc
 		exx
+		ld	(user_hl), hl
+		ld	(user_de), de
+		ld	(user_bc), bc
+
 		ex	af, af'
 		push	af
+		pop	hl
+		ld	(user_af2), hl
 		ex	af, af'
+		push	af
+		pop	hl
+		ld	(user_af), hl
 		ld	a, r
 		ld	(user_r), a
 		ld	a, i
 		ld	(user_i), a
 
-		; Copy 10 stacked register pairs to user context
-		ld	hl, 0
-		add	hl, sp
-		ld	de, user_af2
-		ld	bc, 20
-		ldir
 
 		; Get return address (points after RST 30h)
 		; "pop" de from user_sp
@@ -1019,6 +1053,11 @@ breakpoint:
 		ld	hl, (break_addr)
 		ld	a, (break_opc)
 		ld	(hl), a
+		ld	hl, (reactiv_addr)		; reactivpoint defined?
+		ld	a, h
+		or	l
+		jr	nz, brk_regs			; yes
+		ld	(break_addr), hl		; no, clr brkpt
 
 		; Display status
 brk_regs:	call	display_regs
@@ -1217,10 +1256,11 @@ last_cmd:
 dump_address:
 		dw	0
 ; INPUT: Keep track of the address to which we next write.
-; Init to input_buffer, M abcd ef ... (space between M and address)
-; writes cd ef ... into input buffer w/o destroying important content
+; modify_valid is 0 until an address has been given (M<addr> or <addr>:)
 modify_address:
-		dw	input_buffer
+		dw	0
+modify_valid:
+		db	0
 
 break_addr:	dw	0
 break_opc:	db	0
@@ -1238,18 +1278,18 @@ reactiv_opc:	db	0
 user_sp:	dw	stack_top
 user_i		db	0
 user_r		db	0
-user_af2:	dw	0			; AF'
-user_bc2:	dw	0			; BC'
-user_de2:	dw	0			; DE'
-user_hl2:	dw	0			; HL'
 user_af:	dw	0
+user_af2:	dw	0			; AF'
 user_bc:	dw	0
 user_de:	dw	0
 user_hl:	dw	0
+user_bc2:	dw	0     			; BC'
+user_de2:	dw	0     			; DE'
+user_hl2:	dw	0     			; HL'
 user_ix:	dw	0
 user_iy:	dw	0
 user_pc:	dw	0
-eser_end:
+user_end:
 
 ;--------------------------------------------------------------
 ; BSS
@@ -1265,4 +1305,6 @@ debug_stack:
 
 ; Command-line input buffer.
 input_buffer:
+		ds	120
+input_buffer_end:
 

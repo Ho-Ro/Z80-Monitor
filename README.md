@@ -38,11 +38,15 @@ The monitor program offers these functions with the following syntax:
 
 - **MODIFY** memory content
   - `MAAAA DD DD ...` - Modify mem at `AAAA`, **no space between `'M'` and the address!**.
-  - `M DD DD ...` - Modify next mem bytes.
-  - `AAAA: DD DD ...` - Modify mem at `AAAA` using WozMon fmt (see SHOW).
+  - `M DD DD ...` - Modify next mem bytes, continuing from the address of a
+    previous `MAAAA ...` or `AAAA: ...` line. `?` if no address has been entered yet.
+  - `AAAA: DD DD ...` - Modify mem at `AAAA` using WozMon fmt (as shown by `WAAAA`).
+    The address may be any 1-4 hex digits (`A:`, `12:`, `123:`, `1234:`); it also
+    sets the address for a following `M DD DD ...` line.
 
 - **GOTO** program location
   - `GAAAA` - Goto program at `AAAA`.
+  - `GAAAA BBBB` - Goto program at `AAAA` and set a breakpoint at `BBBB`.
   - `G` - Goto program counter of user context, e.g. resume from last breakpoint.
   - `G0` - Exit to CP/M or restart the Z80-MBC2 monitor.
 
