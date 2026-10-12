@@ -58,6 +58,30 @@ The monitor program offers these functions with the following syntax:
     Breakpoints and reactivation points are implemented by replacing the opcode at `AAAA` and `BBBB` with `RST` instructions.  
     This only works if the addresses `AAAA` and `BBBB` point to the first byte of the opcode (M1).
 
+- **IOS** I/O commands (Z80-MBC2 build only)
+  - `O CMD DD` - store IOS output opcode `CMD` and write a data byte `DD` to it.
+    Examples: `O 00 01` (USER LED on), `O 00 00` (USER LED off), `O 03 FF` (GPIOA all high).  
+    Same port sequence as `CONOUT` (`STO_OPC` store, `EX_OPC` execute write).
+  - `Q CMD [NN]` - store IOS input opcode `CMD` and read `NN` bytes (default 1);
+    multi-byte reads (e.g. `Q 84 7` DATETIME) are read sequentially without re-store.
+  - The commands are only compiled in the `MBC2` build; in the `CP/M` (`zxcc`)
+    build they report `?`. `CMD`, `DD` and `NN` are 1-2 hex digits.
+  - Useful opcodes (see `IOS-Z80-MBC2-NG`):
+
+    | `CMD` | Dir | Function |
+    |---|---|---|
+    | `00` | W | USER LED (bit 0: 0 = off, 1 = on) |
+    | `01` | W | Serial TX |
+    | `03`/`04` | W | GPIOA / GPIOB |
+    | `05`/`06` | W | IODIRA / IODIRB (direction) |
+    | `07`/`08` | W | GPPUA / GPPUB (pull-ups) |
+    | `80` | R | USER KEY |
+    | `81`/`82` | R | GPIOA / GPIOB |
+    | `83` | R | SYSFLAGS |
+    | `84` | R | DATETIME (7 bytes: s min h d mon y temp) |
+    | `85` | R | ERRDISK |
+    | `89` | R | SYSIRQ |
+
 - **REGISTER** display
   - `R` - show the user register including the 2nd register set `AF'`, `BC'`, `DE'`, `HL'` and, if applicable, the address of the breakpoint and its recovery.
 

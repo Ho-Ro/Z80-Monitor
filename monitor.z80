@@ -25,6 +25,9 @@
 ;
 ;  aaaa: dd dd dd ...	-> Modify data byte(s) dd at address aaaa (WozMon fmt)
 ;
+;  O cc dd		-> I/O write: store IOS opcode cc, write data byte dd (MBC2)
+;  Q cc [nn]		-> I/O read: store IOS opcode cc, print nn bytes (default 1)
+;
 ;  G			-> Goto address in user context, e.g. last breakpoint
 ;  Gaaaa		-> Goto address aaaa
 ;  G0			-> Exit to CP/M or restart the Z80-MBC2 monitor
@@ -66,8 +69,17 @@ SPC		equ	20h
 RUB		equ	7Fh
 
 ; select either Z80-MBC2 I/O or CP/M I/O
+;
+; The default build here is CP/M (`zx80asm monitor/hfs`).
+; The Z80-MBC2 ROM build is `monmbc2.z80`, which pre-defines both
+; symbols and INCLUDEs this file (see Makefile).
+;
+	ifndef	CPM
 CPM		equ	TRUE
+	endif
+	ifndef	MBC2
 MBC2		equ	not CPM
+	endif
 
 ; Z80-MBC2 IO map
 ;
@@ -210,7 +222,7 @@ is_upper:
 		cp	CR
 		jr	nz, mon_inp_loop	; full and not CR -> ignore
 store_char:
-		; add to line (BDOS function 1 has already echoed it)
+		; add to line (conin already echoed it: BDOS fct 1 on CP/M, IOS on MBC2)
 		ld	(hl),a
 
 		; was it return?  If so process
@@ -320,12 +332,13 @@ process_repeat:
 		inc	hl
 		ld	(hl), CR
 		dec	hl
+		; the conin CR echo already returned to column 0; the repeated
+		; output overwrites the prompt line instead of advancing
 		jr	process2
 
 process1:
 		ld	(last_cmd), a
-		ld	a, LF
-		call	conout
+		call	out_crlf		; echo CR + LF (the CR echo alone may be dropped by terminals)
 
 process2:
 		ld	a, (hl)			; cmd char
@@ -348,9 +361,26 @@ process2:
 
 		; K == BREAKPOINT
 		cp	'K'
-		jr	nz, process_R
+		jr	nz, process_O
 		call	break_handler
 		jp	prompt
+
+		; O == IOS output (MBC2 only)
+process_O:
+		cp	'O'
+	if	MBC2
+		jp	z, o_handler
+	else
+		jp	z, cmd_error
+	endif
+
+		; Q == IOS query (MBC2 only)
+		cp	'Q'
+	if	MBC2
+		jp	z, q_handler
+	else
+		jp	z, cmd_error
+	endif
 
 process_R:
 		; R == VIEW REGISTER
@@ -848,9 +878,24 @@ conout:
 conin:
 	if	MBC2
 
+conin_wait:
 		in	a, (RXD)		; Read a char from "virtual" UART
 		cp	0FFh			; Char? ($FF from UART = no char)
-		jr	z, conin		; No, loop until valid character
+		jr	z, conin_wait		; No, loop until valid character
+		; Echo like CP/M BDOS fct 1 so callers need no build-specific logic.
+		cp	BS			; BS/RUB is echoed by the caller (handle_bs)
+		jr	z, conin_done
+		cp	RUB
+		jr	z, conin_done
+		cp	CR			; CR -> echo CR only (column 0)
+		jr	nz, conin_echo
+		call	conout			; paging output overwrites in place
+		jr	conin_done
+conin_echo:
+		push	af
+		call	conout			; echo typed char
+		pop	af
+conin_done:
 		ret
 
 	endif
@@ -867,6 +912,63 @@ conin:
 		pop	bc
 		ret
 
+	endif
+
+
+;--------------------------------------------------------------
+;
+; IOS OUTPUT - O <CMD> <DATA>
+; store IOS opcode <CMD>, then execute a write with data byte <DATA>
+; e.g. O 00 01 -> USER LED on, O 00 00 -> USER LED off
+; (only in the MBC2 build; same port sequence as conout)
+;
+;--------------------------------------------------------------
+;
+o_handler:
+	if	MBC2
+		call	get_first_arg		; CMD
+		jp	c, cmd_error
+		; store opcode (like conout does with OPC_TX)
+		ld	a, c
+		out	(STO_OPC), a		; STORE Opcode
+		call	get_next_arg		; DATA
+		jp	c, cmd_error
+		; execute write with data byte
+		ld	a, c
+		out	(EX_OPC), a		; EXECUTE WRITE
+		jp	prompt
+	endif
+
+;--------------------------------------------------------------
+;
+; IOS QUERY - Q <CMD> [NN]
+; store IOS opcode <CMD>, then read NN bytes (default 1) from EX_OPC
+; e.g. Q 80  -> USER KEY, Q 84 7 -> DATETIME
+; (only in the MBC2 build)
+;
+;--------------------------------------------------------------
+;
+q_handler:
+	if	MBC2
+		call	get_first_arg		; CMD
+		jp	c, cmd_error
+		ld	a, c
+		out	(STO_OPC), a		; STORE Opcode
+		; byte count, default 1
+		ld	b, 1
+		call	get_next_arg		; optional NN
+		jr	c, q_read
+		ld	a, c
+		or	a
+		jp	z, cmd_error		; NN = 0 -> error
+		ld	b, a
+q_read:		in	a, (EX_OPC)		; EXECUTE READ / next byte
+		call	out_byte
+		ld	a, ' '
+		call	conout
+		djnz	q_read
+		call	out_crlf
+		jp	prompt
 	endif
 
 
