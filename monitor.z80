@@ -5,36 +5,37 @@
 ; Monitor program for CP/M or Z80-MBC2
 ;
 ; Accept strings from CONIN and execute them with CR.
-; BS/RUB deletes char to the left. ^C returns to CP/M.
+; BS/RUB deletes char to the left, other control chars are ignored.
+; ^C returns to CP/M (CP/M build) resp. restarts the monitor (MBC2 build).
 ;
-; Use SLR z80asm:
-; z80asm monitor/af to create monitor.com
-; z80asm monitor/hf to create monitor.hex
+; Use zasm (Linux):
+; zasm -uw --target=ram -x monitor.z80 -o monitor.hex
+;
+; Use SLR z80asm.com (CP/M) - this requires the .z80 extension
+; z80asm monitor/hfs
 ;
 ; Built-in commands
 ;
 ;
-;  Vaaaa		-> View 16 bytes of Memory at address aaaa
+;  V aaaa		-> View 16 bytes of Memory at address aaaa
 ;  V			-> View next 16 bytes (also CR alone)
 ;
-;  Waaaa		-> Show 16 bytes in Wozmon format (aaaa: dd dd ...)
+;  W aaaa		-> Show 16 bytes in Wozmon format (aaaa: dd dd ...)
 ;  W			-> Show next 16 bytes (also CR alone)
 ;
-;  Maaaa dd dd dd ...	-> Modify data byte(s) dd at address aaaa
-;  M dd dd dd ...	-> Modify next data byte(s) dd
-;
 ;  aaaa: dd dd dd ...	-> Modify data byte(s) dd at address aaaa (WozMon fmt)
+;			   CR alone then shows 16 bytes in Wozmon format at aaaa
 ;
 ;  O cc dd		-> I/O write: store IOS opcode cc, write data byte dd (MBC2)
 ;  Q cc [nn]		-> I/O read: store IOS opcode cc, print nn bytes (default 1)
 ;
 ;  G			-> Goto address in user context, e.g. last breakpoint
-;  Gaaaa		-> Goto address aaaa
-;  G0			-> Exit to CP/M or restart the Z80-MBC2 monitor
+;  G aaaa		-> Goto address aaaa
+;  G 0			-> Exit to CP/M or restart the Z80-MBC2 monitor
 ;
 ;  K or K0		-> Clear breaKpoint
-;  Kaaaa		-> Set breaKpoint at aaaa
-;  Kaaaa bbbb		-> as above, breaKpoint is reactivated at bbbb
+;  K aaaa		-> Set breaKpoint at aaaa
+;  K aaaa bbbb		-> as above, breaKpoint is reactivated at bbbb
 ;
 ;  R			-> Show Register contents
 ;
@@ -56,29 +57,34 @@
 ;  2026-07-10	Martin Homuth-Rosemann
 ;	add cmd K to handle breakpoint and reactivation
 ;
+;  2026-10-09	Martin Homuth-Rosemann
+;	fix modify/woz input and buffer overrun
+;	refactor breakpoint and context save/restore
+;	doc update
+;
+;  2026-10-12	Martin Homuth-Rosemann
+;	in_char input echo; add cmd O <OPC> <DAT>; add cmd Q <OPC> [<NUM<]
+;
+;  2026-10-13	Martin Homuth-Rosemann
+;	modify syntax to enable zasm build (syntax was SLR z80asm for CP/M)
+;	drop 'M' modify command due to difficult and dangerous syntax
+;	ignore control chars except BS/RUB/CR/^C; ^C restarts the monitor in MBC2
+;
 ;--------------------------------------------------------------
 
 FALSE		equ	0
-TRUE		equ	not FALSE
+TRUE		equ	0FFh
 
-CTRLC		equ     03h
-BS		equ	08h
-CR		equ	0Dh
-LF		equ	0Ah
-SPC		equ	20h
-RUB		equ	7Fh
+; select either Z80-MBC2 I/O (+ cmd O, Q) or CP/M I/O
+;
 
-; select either Z80-MBC2 I/O or CP/M I/O
-;
-; The default build here is CP/M (`zx80asm monitor/hfs`).
-; The Z80-MBC2 ROM build is `monmbc2.z80`, which pre-defines both
-; symbols and INCLUDEs this file (see Makefile).
-;
-	ifndef	CPM
+MBC2		equ	FALSE
+
+
+	if	MBC2
+CPM		equ	FALSE
+	else
 CPM		equ	TRUE
-	endif
-	ifndef	MBC2
-MBC2		equ	not CPM
 	endif
 
 ; Z80-MBC2 IO map
@@ -97,7 +103,17 @@ OPC_RXAVAIL	equ	8Bh		; Number if input char
 ;
 	if	CPM
 BDOS		equ	0005h
+CONIN		equ	1
+CONOUT		equ	2
 	endif
+
+; Char defines
+CTRLC		equ     03h
+BS		equ	08h
+CR		equ	0Dh
+LF		equ	0Ah
+SPC		equ	20h
+RUB		equ	7Fh
 
 ; Breakpoint defines
 ;
@@ -111,7 +127,7 @@ OPC_RST28	equ	0efh
 
 		if	MBC2
 
-		org	0F000h
+		org	0F800h
 
 		endif
 
@@ -132,8 +148,8 @@ OPC_RST28	equ	0efh
 ;--------------------------------------------------------------
 start:
 		jp	init			; cold start
-		jp	conin			; wait for char in A
-		jp	conout			; output char in A
+		jp	in_char			; wait for char in A
+		jp	out_char		; output char in A
 		jp	out_byte		; output A as 2 hex digits
 		jp	out_crlf		; output CR and LF
 		jp	out_word		; output HL as 4 hex digits
@@ -142,15 +158,24 @@ start:
 						; input: HL points to 1st hex char
 						; output: BC and A, HL points after hex char
 						; CY set when error, HL points to bad char
+start_msg:
+	if	MBC2
+		db	CR, LF, "MBC2 MON", 0
+	else
+		db	CR, LF, "CP/M MON", 0
+	endif
 init:
 		ld	sp, stack_top
-		ld	(user_sp), sp
-		ld	hl, user_i
+		ld	hl, start_msg
+		call	out_string
+
 		xor	a
-		ld	b, user_pc-user_i	; clear all user_xx reg
+		ld	b, user_end-last_cmd	; clear all monitor regs
+		ld	hl, last_cmd
 init1:		ld	(hl), a
 		inc	hl
 		djnz	init1
+		ld	(user_sp), sp
 		ld	a, OPC_JP
 		ld	(30h), a		; at RST30
 		ld	(28h), a		; at RST28
@@ -181,7 +206,7 @@ no_rst
 		ld	(user_pc), hl		; clear user PC
 		; show the prompt
 prompt:		ld	a, '>'
-		call	conout
+		call	out_char
 		ld	hl, input_buffer
 		ld	d, h
 		ld	e, l
@@ -192,14 +217,21 @@ prompt:		ld	a, '>'
 
 mon_inp_loop:
 		; read and store the new character
-		call	conin
-	if	CPM
-		; break?
+		call	in_char
+		; break?  CP/M: return to CP/M    MBC2: restart the monitor
 		cp	CTRLC
+	if	CPM
 		jp	z, 0
+	else
+		jp	z, start
 	endif
 		call	handle_bs
 		jr	c, mon_inp_loop
+		; ignore control chars (BS/RUB handled above, CR ends the line)
+		cp	' '
+		jr	nc, to_upper
+		cp	CR
+		jr	nz, mon_inp_loop
 
 to_upper:
 		; is it lower-case?  If so upper-case it.
@@ -222,7 +254,7 @@ is_upper:
 		cp	CR
 		jr	nz, mon_inp_loop	; full and not CR -> ignore
 store_char:
-		; add to line (conin already echoed it: BDOS fct 1 on CP/M, IOS on MBC2)
+		; add to line (in_char already echoed it: BDOS fct 1 on CP/M, IOS on MBC2)
 		ld	(hl),a
 
 		; was it return?  If so process
@@ -261,11 +293,11 @@ do_backspace:
 		jr	z, bs_cant_delete		; at start, cannot delete
 		jr	c, bs_cant_delete		; before start, cannot delete
 		ld	a, 08h				; backspace
-		call	conout
+		call	out_char
 		ld	a, ' '				; space (erase displayed char)
-		call	conout
+		call	out_char
 		ld	a, 08h				; backspace again
-		call	conout
+		call	out_char
 		pop	hl				; restore original HL
 		dec	hl				; move back one character
 		ld	(hl), 0				; clear the character
@@ -287,7 +319,6 @@ bs_cant_delete:
 ;
 ;  V 				=> View memory
 ;  W 				=> Wozdump memory
-;  M 				=> Modify data
 ;  aaaa: dd dd dd ...		=> Modify data
 ;  G				=> Goto
 ;  R				=> Register display
@@ -332,7 +363,7 @@ process_repeat:
 		inc	hl
 		ld	(hl), CR
 		dec	hl
-		; the conin CR echo already returned to column 0; the repeated
+		; the in_char CR echo already returned to column 0; the repeated
 		; output overwrites the prompt line instead of advancing
 		jr	process2
 
@@ -354,10 +385,6 @@ process2:
 		; G == GOTO
 		cp	'G'
 		jp	z, goto_handler
-
-		; M == MODIFY
-		cp	'M'
-		jp	z, modify_handler
 
 		; K == BREAKPOINT
 		cp	'K'
@@ -499,7 +526,7 @@ process_SP:
 		;
 cmd_error:
 		ld	a, '?'
-		call	conout
+		call	out_char
 		call	out_crlf
 		jp	prompt
 
@@ -554,14 +581,14 @@ dump_next:
 view_fmt:
 		ld	a, ' '
 woz_fmt:
-		call	conout
+		call	out_char
 
 		; Loop to print the next 16 bytes at that address.
 		ld	b, 16
 dump_byte:
 		; show a space
 		ld	a, ' '
-		call	conout
+		call	out_char
 
 		; show the memory-contents.
 		ld	a, (hl)
@@ -577,9 +604,9 @@ dump_byte:
 		ld	hl, (dump_address)
 
 		ld	a, ' '
-		call	conout
+		call	out_char
 		ld	a, ' '
-		call	conout
+		call	out_char
 
 		; Loop to print the next 16 bytes at that address.
 		ld	b, 16
@@ -592,7 +619,7 @@ dump_char:
 		jr	nc, dot
 		jr	no_dot
 dot:		ld	a, '.'
-no_dot:		call	conout
+no_dot:		call	out_char
 		inc	hl
 		djnz	dump_char
 
@@ -606,15 +633,16 @@ dump_end:
 
 ;--------------------------------------------------------------
 ;
-; MODIFY handler allows code to be input at a given address
-;
-; Come here with WOZ format
+; WOZ data input modifies data at a given address
 ;
 ; Usage is:
 ;
 ;  0123: 01 02 03 04 0F
 ;
 ; i.e. "<address>: byte1 byte2 .. byteN"
+;
+; A following bare CR then echoes the stored bytes in Wozmon
+; format (16 bytes) at the given address.
 ;
 ;--------------------------------------------------------------
 ;
@@ -623,53 +651,12 @@ woz_input:
 		call	hex_to_bc
 		jp	c, cmd_error
 		ld	(modify_address), bc
-		ld	a, 1
-		ld	(modify_valid), a
+		ld	(dump_address), bc	; bare CR echoes a W dump from the edit start
+		ld	a, 'W'
+		ld	(last_cmd), a		; CR alone repeats the Wozmon-format dump
 		; HL points at the space that replaced the colon
 		jr	modify_byte
 
-;--------------------------------------------------------------
-;
-; MODIFY handler allows code to be input at a given address
-;
-; Usage is:
-;
-;  M0123 01 02 03 04 0F
-;
-; i.e. "M<address> byte1 byte2 .. byteN"
-; There must be NO SPACE between `M` and `<address>`!
-;
-; If there is no address keep going from the last time,
-; which means this works as you expect:
-;
-;   M1000 01 02
-;   M 03 04 0F
-;
-;--------------------------------------------------------------
-;
-modify_handler:
-		; Our input-buffer will start with 'M',
-		; so we start looking at the next character.
-		ld	hl, input_buffer+1
-
-		; Look at the next input-byte.  If it is a space then no address was
-		; given, so we keep appending bytes to the address set previously.
-		ld	a, (hl)
-		cp	' '
-		jr	z, modify_cont
-
-		; OK we expect an (ASCII) address at (HL) - Read it into BC.
-		call	hex_to_bc
-		jp	c, cmd_error
-		ld	(modify_address), bc
-		ld	a, 1
-		ld	(modify_valid), a
-		jr	modify_byte
-modify_cont:
-		; no address given: continue from last time, if any
-		ld	a, (modify_valid)
-		or	a
-		jp	z, cmd_error
 modify_byte:
 		; HL contains the a string.  Get the next byte
 		ld	a, (hl)
@@ -815,15 +802,15 @@ out_string:
 		ld	a, (hl)
 		or	a
 		ret	z
-		call	conout
+		call	out_char
 		inc	hl
 		jr	out_string
 
 out_crlf:
 		ld	a, CR
-		call	conout
+		call	out_char
 		ld	a, LF
-		jp	conout
+		jp	out_char
 
 
 ;
@@ -848,7 +835,7 @@ out_nibble:
 		sbc	69h
 		daa
 
-conout:
+out_char:
 	if	MBC2
 
 		push	af			; Save TXD char
@@ -865,9 +852,9 @@ conout:
 		push	bc
 		push	de
 		push	hl
-		ld	c,2
+		ld	c,CONOUT
 		ld	e,a
-		call	bdos
+		call	BDOS
 		pop	hl
 		pop	de
 		pop	bc
@@ -875,28 +862,24 @@ conout:
 
 	endif
 
-conin:
+in_char:
 	if	MBC2
 
-conin_wait:
+in_char_wait:
 		in	a, (RXD)		; Read a char from "virtual" UART
 		cp	0FFh			; Char? ($FF from UART = no char)
-		jr	z, conin_wait		; No, loop until valid character
+		jr	z, in_char_wait		; No, loop until valid character
 		; Echo like CP/M BDOS fct 1 so callers need no build-specific logic.
 		cp	BS			; BS/RUB is echoed by the caller (handle_bs)
-		jr	z, conin_done
+		ret	z
 		cp	RUB
-		jr	z, conin_done
-		cp	CR			; CR -> echo CR only (column 0)
-		jr	nz, conin_echo
-		call	conout			; paging output overwrites in place
-		jr	conin_done
-conin_echo:
-		push	af
-		call	conout			; echo typed char
-		pop	af
-conin_done:
-		ret
+		ret	z
+		cp	CR			; CR returns cursor to column 0
+		jr	z, in_char_echo
+		cp	' '			; other control chars are ignored by the caller
+		ret	c			; -> no echo
+in_char_echo:
+		jr	out_char			; echo typed char
 
 	endif
 
@@ -905,8 +888,8 @@ conin_done:
 		push	bc
 		push	de
 		push	hl
-		ld	c, 1			; console input, blocks (cooperative)
-		call	bdos
+		ld	c, CONIN		; console input, blocks (cooperative)
+		call	BDOS
 		pop	hl
 		pop	de
 		pop	bc
@@ -920,7 +903,7 @@ conin_done:
 ; IOS OUTPUT - O <CMD> <DATA>
 ; store IOS opcode <CMD>, then execute a write with data byte <DATA>
 ; e.g. O 00 01 -> USER LED on, O 00 00 -> USER LED off
-; (only in the MBC2 build; same port sequence as conout)
+; (only in the MBC2 build; same port sequence as out_char)
 ;
 ;--------------------------------------------------------------
 ;
@@ -928,7 +911,7 @@ o_handler:
 	if	MBC2
 		call	get_first_arg		; CMD
 		jp	c, cmd_error
-		; store opcode (like conout does with OPC_TX)
+		; store opcode (like out_char does with OPC_TX)
 		ld	a, c
 		out	(STO_OPC), a		; STORE Opcode
 		call	get_next_arg		; DATA
@@ -965,7 +948,7 @@ q_handler:
 q_read:		in	a, (EX_OPC)		; EXECUTE READ / next byte
 		call	out_byte
 		ld	a, ' '
-		call	conout
+		call	out_char
 		djnz	q_read
 		call	out_crlf
 		jp	prompt
@@ -1211,63 +1194,63 @@ display_regs:
 		ld	a, (user_af+1)
 		call	out_byte			; A
 		ld	a, ' '
-		call	conout
+		call	out_char
 		ld	a, (user_af)
 		call	out_byte			; F
 		ld	a, ' '
-		call	conout
+		call	out_char
 		ld	hl, (user_bc)
 		call	out_word			; BC
 		ld	a, ' '
-		call	conout
+		call	out_char
 		ld	hl, (user_de)
 		call	out_word			; DE
 		ld	a, ' '
-		call	conout
+		call	out_char
 		ld	hl, (user_hl)
 		call	out_word			; HL
 		ld	a, ' '
-		call	conout
+		call	out_char
 		ld	a, (user_af2+1)
 		call	out_byte			; A'
 		ld	a, ' '
-		call	conout
+		call	out_char
 		ld	a, (user_af2)
 		call	out_byte			; F'
 		ld	a, ' '
-		call	conout
+		call	out_char
 		ld	hl, (user_bc2)
 		call	out_word			; BC'
 		ld	a, ' '
-		call	conout
+		call	out_char
 		ld	hl, (user_de2)
 		call	out_word			; DE'
 		ld	a, ' '
-		call	conout
+		call	out_char
 		ld	hl, (user_hl2)
 		call	out_word			; HL'
 		ld	a, ' '
-		call	conout
+		call	out_char
 		ld	hl, (user_ix)
 		call	out_word			; IX
 		ld	a, ' '
-		call	conout
+		call	out_char
 		ld	hl, (user_iy)
 		call	out_word			; IY
 		ld	a, ' '
-		call	conout
+		call	out_char
 		ld	a, (user_i)
 		call	out_byte			; I
 		ld	a, ' '
-		call	conout
+		call	out_char
 		ld	a, (user_r)
 		call	out_byte			; R
 		ld	a, ' '
-		call	conout
+		call	out_char
 		ld	hl, (user_pc)
 		call	out_word			; PC
 		ld	a, ' '
-		call	conout
+		call	out_char
 		ld	hl, (user_sp)
 		call	out_word			; SP
 		call	out_crlf
@@ -1290,7 +1273,7 @@ display_regs:
 		ld	hl, (break_addr)
 		call	out_word
 		ld	a, '/'
-		call	conout
+		call	out_char
 		ld	hl, (reactiv_addr)
 		call	out_word
 disp_end:
@@ -1309,38 +1292,38 @@ display_flags:
 		ld	a, 's'
 		jr	z, flagZ
 		ld	a, 'S'
-flagZ:		call	conout
+flagZ:		call	out_char
 		bit	6, b
 		ld	a, 'z'
 		jr	z, flag5
 		ld	a, 'Z'
-flag5:		call	conout
+flag5:		call	out_char
 		ld	a, '.'
-flagH:		call	conout
+flagH:		call	out_char
 		ld	a, '.'
-flag3:		call	conout
+flag3:		call	out_char
 		ld	a, '.'
-flagP:		call	conout
+flagP:		call	out_char
 		bit	2, b
 		ld	a, 'p'
 		jr	z, flagN
 		ld	a, 'P'
-flagN		call	conout
+flagN		call	out_char
 		ld	a, '.'
-flagC:		call	conout
+flagC:		call	out_char
 		bit	0, b
 		ld	a, 'c'
 		jr	z, flagrdy
 		ld	a, 'C'
-flagrdy:	jp	conout
+flagrdy:	jp	out_char
 
 
 ;--------------------------------------------------------------
 ; DATA
 ;--------------------------------------------------------------
 
-spaces13:	db	"     ",
-spaces8:	db	"    ",
+spaces13:	db	"     "
+spaces8:	db	"    "
 spaces4:	db	"    ", 0
 
 
@@ -1358,11 +1341,8 @@ last_cmd:
 dump_address:
 		dw	0
 ; INPUT: Keep track of the address to which we next write.
-; modify_valid is 0 until an address has been given (M<addr> or <addr>:)
 modify_address:
 		dw	0
-modify_valid:
-		db	0
 
 break_addr:	dw	0
 break_opc:	db	0
@@ -1374,10 +1354,7 @@ reactiv_opc:	db	0
 ;--------------------------------------------------------------
 ; USER CONTEXT
 ;--------------------------------------------------------------
-
-		;org	($+0fh) and 0fff0h
-
-user_sp:	dw	stack_top
+user_ctxt:
 user_i		db	0
 user_r		db	0
 user_af:	dw	0
@@ -1392,21 +1369,22 @@ user_ix:	dw	0
 user_iy:	dw	0
 user_pc:	dw	0
 user_end:
+user_sp:	dw	stack_top
 
 ;--------------------------------------------------------------
-; BSS
+; BSS - do not use "ds" b/c this would increase the hex size
 ;--------------------------------------------------------------
 
-		org	($+0fh) and 0fff0h
+		;org	($+0fh) and 0fff0h	; TEST: advance to next 16 byte block
 
-stack_bottom:
-		ds	64
-stack_top:
-		ds	64
-debug_stack:
+stack_bottom	equ	$
 
-; Command-line input buffer.
-input_buffer:
-		ds	120
-input_buffer_end:
+stack_top	equ	stack_bottom + 64	; stack for monitor
+
+debug_stack	equ	stack_top + 64		; stack for breakpoint
+
+; Command-line input buffer
+input_buffer	equ	debug_stack		; buffer grows up
+
+input_buffer_end equ	input_buffer + 128	; guard for overrun
 
