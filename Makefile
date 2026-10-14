@@ -1,20 +1,36 @@
+PRJ1 = monitor
+PRJ2 = mbc2mon
+
+SRC1 = $(PRJ1).z80
+HEX1 = $(PRJ1).hex
+COM1 = $(PRJ1).com
+
+SRC2 = $(PRJ2).z80
+HEX2 = $(PRJ2).hex
+
+
 .PHONY: all
-all: monitor.com montest.com test.woz monmbc2.hex
+all: $(COM1) $(HEX1) $(HEX2) montest.com test.woz
 
-monitor.com: monitor.hex
-	zxcpm load monitor
+$(COM1): $(SRC1)
+	zx80asm $(PRJ1)/afs
 
-monmbc2.hex: monmbc2.z80 monitor.z80
-	zx80asm monmbc2/hfs
+$(HEX1): $(SRC1)
+	zx80asm $(PRJ1)/hfs
 
-montest.com: montest.hex
-	zxcpm load montest
+
+$(HEX2): $(SRC2)
+	zx80asm $(PRJ2)/hfs
 
 montest.hex: monitor.hex test.hex
 	./hexcat $^ > $@
 
-monitor.hex: monitor.z80
-	zx80asm monitor/hfs
+montest.com: montest.hex
+	zxcpm load montest
+
+$(SRC2): $(SRC1)
+	sed -e 's/^\([[:space:]]*MBC2[[:space:]]\+equ[[:space:]]\+\)FALSE\>/\1TRUE/' $< > $@
+
 
 test.hex: test.z80
 	zx80asm test/hfs
@@ -24,4 +40,4 @@ test.woz: test.hex
 
 .PHONY: clean
 clean:
-	rm -f monitor.com montest.com test.woz *.hex *.lst *~
+	rm -f $(COM1) montest.com test.woz *.hex *.lst *~
